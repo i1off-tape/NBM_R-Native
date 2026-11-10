@@ -247,6 +247,7 @@ pub mod dosimetry {
     use std::collections::{HashMap, HashSet};
     use super::content;
     use super::radiation;
+    use super::sickness;
 
     /// Chunk radiation state storing ambient Rad and particulate Fallout.
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -313,6 +314,8 @@ pub mod dosimetry {
         pub last_ambient_rate: f32,
         /// Last measured absorbed dose rate after armor attenuation (Rad/s).
         pub last_absorbed_rate: f32,
+        /// Number of exposure ticks processed for this player.
+        pub ticks_alive: u64,
     }
 
     impl PlayerDosimetryData {
@@ -321,7 +324,86 @@ pub mod dosimetry {
                 dose,
                 last_ambient_rate: 0.0,
                 last_absorbed_rate: 0.0,
+                ticks_alive: 0,
             }
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.dose <= 0.0 && self.last_ambient_rate <= 0.0 && self.last_absorbed_rate <= 0.0
+        }
+
+        /// 20-byte little-endian binary serialization:
+        /// [dose: 4B, last_ambient_rate: 4B, last_absorbed_rate: 4B, ticks_alive: 8B]
+        pub fn to_bytes(&self) -> [u8; 20] {
+            let mut bytes = [0u8; 20];
+            bytes[0..4].copy_from_slice(&self.dose.to_le_bytes());
+            bytes[4..8].copy_from_slice(&self.last_ambient_rate.to_le_bytes());
+            bytes[8..12].copy_from_slice(&self.last_absorbed_rate.to_le_bytes());
+            bytes[12..20].copy_from_slice(&self.ticks_alive.to_le_bytes());
+            bytes
+        }
+
+        /// Deserialize from little-endian slice (accepts 20 bytes, or 12 bytes backwards-compatible).
+        pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+            if bytes.len() < 12 {
+                return None;
+            }
+            let dose = f32::from_le_bytes(bytes[0..4].try_into().ok()?);
+            let last_ambient_rate = f32::from_le_bytes(bytes[4..8].try_into().ok()?);
+            let last_absorbed_rate = f32::from_le_bytes(bytes[8..12].try_into().ok()?);
+            let ticks_alive = if bytes.len() >= 20 {
+                u64::from_le_bytes(bytes[12..20].try_into().ok()?)
+            } else {
+                0
+            };
+            Some(Self {
+                dose,
+                last_ambient_rate,
+                last_absorbed_rate,
+                ticks_alive,
+            })
+        }
+
+        /// Deterministic JSON format for human-readable debugging / storage.
+        pub fn to_json(&self) -> String {
+            format!(
+                r#"{{"dose":{:.4},"ambient_rate":{:.4},"absorbed_rate":{:.4},"ticks":{}}}"#,
+                self.dose, self.last_ambient_rate, self.last_absorbed_rate, self.ticks_alive
+            )
+        }
+
+        /// Parse from JSON string.
+        pub fn from_json(s: &str) -> Option<Self> {
+            let s = s.trim();
+            let dose_idx = s.find("\"dose\":")?;
+            let after_dose = &s[dose_idx + 7..];
+            let dose_end = after_dose.find(|c: char| c == ',' || c == '}')?;
+            let dose: f32 = after_dose[..dose_end].trim().parse().ok()?;
+
+            let amb_idx = s.find("\"ambient_rate\":")?;
+            let after_amb = &s[amb_idx + 15..];
+            let amb_end = after_amb.find(|c: char| c == ',' || c == '}')?;
+            let last_ambient_rate: f32 = after_amb[..amb_end].trim().parse().ok()?;
+
+            let abs_idx = s.find("\"absorbed_rate\":")?;
+            let after_abs = &s[abs_idx + 16..];
+            let abs_end = after_abs.find(|c: char| c == ',' || c == '}')?;
+            let last_absorbed_rate: f32 = after_abs[..abs_end].trim().parse().ok()?;
+
+            let ticks = if let Some(ticks_idx) = s.find("\"ticks\":") {
+                let after_ticks = &s[ticks_idx + 8..];
+                let ticks_end = after_ticks.find(|c: char| c == ',' || c == '}')?;
+                after_ticks[..ticks_end].trim().parse().ok()?
+            } else {
+                0
+            };
+
+            Some(Self {
+                dose,
+                last_ambient_rate,
+                last_absorbed_rate,
+                ticks_alive: ticks,
+            })
         }
     }
 
@@ -489,7 +571,16 @@ pub mod dosimetry {
         let absorbed_rate = calculate_absorbed_exposure(ambient_rate, hazmat_pieces);
         dosimetry.last_ambient_rate = ambient_rate;
         dosimetry.last_absorbed_rate = absorbed_rate;
-        dosimetry.dose += absorbed_rate * delta_seconds;
+        if ambient_rate > 0.0 {
+            dosimetry.dose += absorbed_rate * delta_seconds;
+        } else {
+            dosimetry.dose = sickness::calculate_natural_recovery(
+                dosimetry.dose,
+                ambient_rate,
+                delta_seconds,
+            );
+        }
+        dosimetry.ticks_alive = dosimetry.ticks_alive.saturating_add(1);
         absorbed_rate
     }
 
@@ -503,6 +594,180 @@ pub mod dosimetry {
         let ix = x.floor() as i32;
         let iz = z.floor() as i32;
         (ix.div_euclid(16), iz.div_euclid(16))
+    }
+}
+
+/// Biological radiation sickness thresholds, status effects, and lethal damage logic.
+pub mod sickness {
+    pub const THRESHOLD_MILD: f32 = 200.0;
+    pub const THRESHOLD_SEVERE: f32 = 500.0;
+    pub const THRESHOLD_LETHAL: f32 = 1000.0;
+
+    pub const DAMAGE_TYPE_RADIATION: &str = "ntm:radiation";
+    pub const NATURAL_RECOVERY_RATE: f32 = 0.05; // 0.05 Rad/s in clean environment
+    pub const LETHAL_DAMAGE_AMOUNT: f32 = 1000.0;
+    pub const SEVERE_PERIODIC_DAMAGE: f32 = 1.0;
+    pub const SEVERE_DAMAGE_INTERVAL_TICKS: u64 = 100; // 5 seconds (20 ticks/sec * 5)
+
+    pub const EFFECT_NAUSEA: &str = "minecraft:nausea";
+    pub const EFFECT_SLOWNESS: &str = "minecraft:slowness";
+    pub const EFFECT_WEAKNESS: &str = "minecraft:weakness";
+    pub const EFFECT_MINING_FATIGUE: &str = "minecraft:mining_fatigue";
+
+    /// Progressive biological sickness stages based on accumulated Rad dose.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum RadiationSicknessStage {
+        None,
+        Mild,
+        Severe,
+        Lethal,
+    }
+
+    impl RadiationSicknessStage {
+        pub fn from_dose(dose: f32) -> Self {
+            if dose >= THRESHOLD_LETHAL {
+                Self::Lethal
+            } else if dose >= THRESHOLD_SEVERE {
+                Self::Severe
+            } else if dose >= THRESHOLD_MILD {
+                Self::Mild
+            } else {
+                Self::None
+            }
+        }
+
+        pub fn is_sick(&self) -> bool {
+            matches!(self, Self::Mild | Self::Severe | Self::Lethal)
+        }
+    }
+
+    /// Status effect descriptor inflicted by radiation sickness.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct StatusEffect {
+        pub id: &'static str,
+        pub amplifier: u8,
+        pub duration_ticks: i32,
+    }
+
+    /// Retrieve the status effects inflicted by a given sickness stage.
+    pub fn get_stage_effects(stage: RadiationSicknessStage) -> Vec<StatusEffect> {
+        match stage {
+            RadiationSicknessStage::None => Vec::new(),
+            RadiationSicknessStage::Mild => vec![
+                StatusEffect {
+                    id: EFFECT_NAUSEA,
+                    amplifier: 0,
+                    duration_ticks: 100,
+                },
+                StatusEffect {
+                    id: EFFECT_SLOWNESS,
+                    amplifier: 0,
+                    duration_ticks: 100,
+                },
+            ],
+            RadiationSicknessStage::Severe => vec![
+                StatusEffect {
+                    id: EFFECT_NAUSEA,
+                    amplifier: 0,
+                    duration_ticks: 100,
+                },
+                StatusEffect {
+                    id: EFFECT_SLOWNESS,
+                    amplifier: 1,
+                    duration_ticks: 100,
+                },
+                StatusEffect {
+                    id: EFFECT_WEAKNESS,
+                    amplifier: 0,
+                    duration_ticks: 100,
+                },
+                StatusEffect {
+                    id: EFFECT_MINING_FATIGUE,
+                    amplifier: 0,
+                    duration_ticks: 100,
+                },
+            ],
+            RadiationSicknessStage::Lethal => vec![
+                StatusEffect {
+                    id: EFFECT_NAUSEA,
+                    amplifier: 0,
+                    duration_ticks: 100,
+                },
+                StatusEffect {
+                    id: EFFECT_SLOWNESS,
+                    amplifier: 2,
+                    duration_ticks: 100,
+                },
+                StatusEffect {
+                    id: EFFECT_WEAKNESS,
+                    amplifier: 1,
+                    duration_ticks: 100,
+                },
+                StatusEffect {
+                    id: EFFECT_MINING_FATIGUE,
+                    amplifier: 1,
+                    duration_ticks: 100,
+                },
+            ],
+        }
+    }
+
+    /// Evaluation result of radiation sickness on an entity.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct SicknessEvaluation {
+        pub stage: RadiationSicknessStage,
+        pub effects: Vec<StatusEffect>,
+        pub damage: Option<f32>,
+        pub damage_type: Option<&'static str>,
+    }
+
+    /// Evaluate biological radiation sickness effects and damage for a given dose and tick.
+    pub fn evaluate_sickness(dose: f32, ticks: u64) -> SicknessEvaluation {
+        let stage = RadiationSicknessStage::from_dose(dose);
+        let effects = get_stage_effects(stage);
+        let (damage, damage_type) = match stage {
+            RadiationSicknessStage::Lethal => (
+                Some(LETHAL_DAMAGE_AMOUNT),
+                Some(DAMAGE_TYPE_RADIATION),
+            ),
+            RadiationSicknessStage::Severe => {
+                if ticks % SEVERE_DAMAGE_INTERVAL_TICKS == 0 {
+                    (
+                        Some(SEVERE_PERIODIC_DAMAGE),
+                        Some(DAMAGE_TYPE_RADIATION),
+                    )
+                } else {
+                    (None, None)
+                }
+            }
+            _ => (None, None),
+        };
+        SicknessEvaluation {
+            stage,
+            effects,
+            damage,
+            damage_type,
+        }
+    }
+
+    /// Calculate natural biological dose recovery in clean (zero-radiation) environment.
+    /// When ambient radiation is 0 (or <= 0), recovers by 0.05 Rad/s.
+    /// When exposed to radiation (ambient > 0), no natural recovery occurs.
+    pub fn calculate_natural_recovery(
+        current_dose: f32,
+        ambient_rate: f32,
+        delta_seconds: f32,
+    ) -> f32 {
+        if ambient_rate <= 0.0 {
+            (current_dose - NATURAL_RECOVERY_RATE * delta_seconds).max(0.0)
+        } else {
+            current_dose
+        }
+    }
+
+    /// Check if a damage source is custom ntm:radiation damage.
+    pub fn is_radiation_damage(damage_type: &str) -> bool {
+        damage_type == DAMAGE_TYPE_RADIATION
     }
 }
 
@@ -599,6 +864,56 @@ pub fn record_player_exposure(
             delta_seconds,
         )
     })
+}
+
+pub fn tick_player_sickness(uuid: u128) -> sickness::SicknessEvaluation {
+    lock_players(|m| {
+        let entry = m.entry(uuid).or_default();
+        let eval = sickness::evaluate_sickness(entry.dose, entry.ticks_alive);
+        if eval.stage == sickness::RadiationSicknessStage::Lethal {
+            entry.dose = 0.0;
+        }
+        eval
+    })
+}
+
+pub fn on_player_death(uuid: u128) {
+    lock_players(|m| {
+        if let Some(entry) = m.get_mut(&uuid) {
+            entry.dose = 0.0;
+            entry.ticks_alive = 0;
+        }
+    });
+}
+
+pub fn save_player_dosimetry(uuid: u128) -> [u8; 20] {
+    get_player_dosimetry(uuid).to_bytes()
+}
+
+pub fn load_player_dosimetry(uuid: u128, bytes: &[u8]) -> bool {
+    if let Some(data) = dosimetry::PlayerDosimetryData::from_bytes(bytes) {
+        lock_players(|m| {
+            m.insert(uuid, data);
+        });
+        true
+    } else {
+        false
+    }
+}
+
+pub fn save_player_dosimetry_json(uuid: u128) -> String {
+    get_player_dosimetry(uuid).to_json()
+}
+
+pub fn load_player_dosimetry_json(uuid: u128, json: &str) -> bool {
+    if let Some(data) = dosimetry::PlayerDosimetryData::from_json(json) {
+        lock_players(|m| {
+            m.insert(uuid, data);
+        });
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -1085,6 +1400,190 @@ mod tests {
         assert_eq!(get_player_dosimetry(uuid).dose, 500.0);
 
         on_chunk_unload(dim, [1, 2]);
+        reset_state();
+    }
+
+    #[test]
+    fn test_radiation_sickness_stages_and_thresholds() {
+        // Healthy: dose < 200 Rad
+        let healthy_eval = sickness::evaluate_sickness(0.0, 100);
+        assert_eq!(healthy_eval.stage, sickness::RadiationSicknessStage::None);
+        assert!(healthy_eval.effects.is_empty());
+        assert_eq!(healthy_eval.damage, None);
+
+        let sub_mild_eval = sickness::evaluate_sickness(199.9, 100);
+        assert_eq!(sub_mild_eval.stage, sickness::RadiationSicknessStage::None);
+        assert!(sub_mild_eval.effects.is_empty());
+
+        // Mild: 200 <= dose < 500 Rad -> Nausea and Slowness
+        let mild_eval = sickness::evaluate_sickness(200.0, 100);
+        assert_eq!(mild_eval.stage, sickness::RadiationSicknessStage::Mild);
+        assert_eq!(mild_eval.damage, None);
+        let effect_ids: Vec<&str> = mild_eval.effects.iter().map(|e| e.id).collect();
+        assert!(effect_ids.contains(&sickness::EFFECT_NAUSEA));
+        assert!(effect_ids.contains(&sickness::EFFECT_SLOWNESS));
+        assert!(!effect_ids.contains(&sickness::EFFECT_WEAKNESS));
+
+        let sub_severe_eval = sickness::evaluate_sickness(499.9, 100);
+        assert_eq!(sub_severe_eval.stage, sickness::RadiationSicknessStage::Mild);
+
+        // Severe: 500 <= dose < 1000 Rad -> Nausea, Slowness, Weakness, Mining Fatigue, periodic damage
+        let severe_interval = sickness::evaluate_sickness(500.0, 100);
+        assert_eq!(severe_interval.stage, sickness::RadiationSicknessStage::Severe);
+        let severe_effect_ids: Vec<&str> = severe_interval.effects.iter().map(|e| e.id).collect();
+        assert!(severe_effect_ids.contains(&sickness::EFFECT_NAUSEA));
+        assert!(severe_effect_ids.contains(&sickness::EFFECT_SLOWNESS));
+        assert!(severe_effect_ids.contains(&sickness::EFFECT_WEAKNESS));
+        assert!(severe_effect_ids.contains(&sickness::EFFECT_MINING_FATIGUE));
+        assert_eq!(severe_interval.damage, Some(sickness::SEVERE_PERIODIC_DAMAGE));
+        assert_eq!(severe_interval.damage_type, Some(sickness::DAMAGE_TYPE_RADIATION));
+
+        // Severe on non-periodic tick -> no damage
+        let severe_non_interval = sickness::evaluate_sickness(500.0, 101);
+        assert_eq!(severe_non_interval.stage, sickness::RadiationSicknessStage::Severe);
+        assert_eq!(severe_non_interval.damage, None);
+
+        let sub_lethal = sickness::evaluate_sickness(999.9, 100);
+        assert_eq!(sub_lethal.stage, sickness::RadiationSicknessStage::Severe);
+
+        // Lethal: dose >= 1000 Rad -> Lethal organ damage via custom ntm:radiation
+        let lethal_eval = sickness::evaluate_sickness(1000.0, 101);
+        assert_eq!(lethal_eval.stage, sickness::RadiationSicknessStage::Lethal);
+        assert_eq!(lethal_eval.damage, Some(sickness::LETHAL_DAMAGE_AMOUNT));
+        assert_eq!(lethal_eval.damage_type, Some(sickness::DAMAGE_TYPE_RADIATION));
+        assert!(sickness::is_radiation_damage(sickness::DAMAGE_TYPE_RADIATION));
+
+        let lethal_extreme = sickness::evaluate_sickness(2500.0, 50);
+        assert_eq!(lethal_extreme.stage, sickness::RadiationSicknessStage::Lethal);
+        assert_eq!(lethal_extreme.damage, Some(sickness::LETHAL_DAMAGE_AMOUNT));
+    }
+
+    #[test]
+    fn test_natural_dose_recovery_in_clean_environment_vs_exposed() {
+        // In clean environment (ambient = 0.0), natural recovery rate is 0.05 Rad/s
+        let mut recovering_player = dosimetry::PlayerDosimetryData::new(100.0);
+        for _ in 0..20 {
+            // 20 ticks * 0.05s = 1.0 second
+            dosimetry::step_player_dosimetry(&mut recovering_player, 0.0, &[], 0, 0.05);
+        }
+        // Expected reduction: 0.05 Rad -> 99.95 Rad
+        assert!((recovering_player.dose - 99.95).abs() < EPSILON);
+
+        // Test clamping at 0.0
+        let mut low_dose_player = dosimetry::PlayerDosimetryData::new(0.02);
+        dosimetry::step_player_dosimetry(&mut low_dose_player, 0.0, &[], 0, 1.0);
+        assert_eq!(low_dose_player.dose, 0.0);
+
+        // In contaminated environment (ambient > 0), no recovery occurs; dose increases
+        let mut exposed_player = dosimetry::PlayerDosimetryData::new(100.0);
+        dosimetry::step_player_dosimetry(&mut exposed_player, 10.0, &[], 0, 1.0);
+        // Ambient 10.0 Rad/s for 1.0s -> dose = 100.0 + 10.0 = 110.0 Rad
+        assert!((exposed_player.dose - 110.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_player_dosimetry_binary_serialization_roundtrip() {
+        let original = dosimetry::PlayerDosimetryData {
+            dose: 345.67,
+            last_ambient_rate: 12.5,
+            last_absorbed_rate: 0.125,
+            ticks_alive: 4242,
+        };
+
+        let bytes = original.to_bytes();
+        assert_eq!(bytes.len(), 20);
+
+        let deserialized = dosimetry::PlayerDosimetryData::from_bytes(&bytes).unwrap();
+        assert!((deserialized.dose - original.dose).abs() < EPSILON);
+        assert!((deserialized.last_ambient_rate - original.last_ambient_rate).abs() < EPSILON);
+        assert!((deserialized.last_absorbed_rate - original.last_absorbed_rate).abs() < EPSILON);
+        assert_eq!(deserialized.ticks_alive, original.ticks_alive);
+
+        // Backwards compatibility with 12-byte slices (without ticks_alive)
+        let slice_12 = &bytes[0..12];
+        let compat = dosimetry::PlayerDosimetryData::from_bytes(slice_12).unwrap();
+        assert!((compat.dose - original.dose).abs() < EPSILON);
+        assert_eq!(compat.ticks_alive, 0);
+
+        // Too short slice (< 12 bytes) fails safely
+        assert!(dosimetry::PlayerDosimetryData::from_bytes(&[0u8; 8]).is_none());
+    }
+
+    #[test]
+    fn test_player_dosimetry_json_serialization_roundtrip() {
+        let original = dosimetry::PlayerDosimetryData {
+            dose: 789.1234,
+            last_ambient_rate: 55.4,
+            last_absorbed_rate: 0.554,
+            ticks_alive: 8888,
+        };
+
+        let json = original.to_json();
+        assert!(json.contains("\"dose\":789.1234"));
+        assert!(json.contains("\"ticks\":8888"));
+
+        let parsed = dosimetry::PlayerDosimetryData::from_json(&json).unwrap();
+        assert!((parsed.dose - original.dose).abs() < EPSILON);
+        assert!((parsed.last_ambient_rate - original.last_ambient_rate).abs() < EPSILON);
+        assert!((parsed.last_absorbed_rate - original.last_absorbed_rate).abs() < EPSILON);
+        assert_eq!(parsed.ticks_alive, original.ticks_alive);
+
+        // Invalid JSON fails safely
+        assert!(dosimetry::PlayerDosimetryData::from_json("invalid json").is_none());
+        assert!(dosimetry::PlayerDosimetryData::from_json(r#"{"dose": "abc"}"#).is_none());
+    }
+
+    #[test]
+    fn test_player_sickness_tick_state_integration() {
+        reset_state();
+        let uuid = 9999u128;
+
+        // Start healthy
+        set_player_dose(uuid, 0.0);
+        let eval_healthy = tick_player_sickness(uuid);
+        assert_eq!(eval_healthy.stage, sickness::RadiationSicknessStage::None);
+
+        // Escalate to Mild
+        set_player_dose(uuid, 250.0);
+        let eval_mild = tick_player_sickness(uuid);
+        assert_eq!(eval_mild.stage, sickness::RadiationSicknessStage::Mild);
+        assert_eq!(eval_mild.damage, None);
+
+        // Escalate to Severe
+        set_player_dose(uuid, 600.0);
+        let eval_severe = tick_player_sickness(uuid);
+        assert_eq!(eval_severe.stage, sickness::RadiationSicknessStage::Severe);
+
+        // Escalate to Lethal
+        set_player_dose(uuid, 1200.0);
+        let eval_lethal = tick_player_sickness(uuid);
+        assert_eq!(eval_lethal.stage, sickness::RadiationSicknessStage::Lethal);
+        assert_eq!(eval_lethal.damage, Some(sickness::LETHAL_DAMAGE_AMOUNT));
+        assert_eq!(eval_lethal.damage_type, Some(sickness::DAMAGE_TYPE_RADIATION));
+        // Lethal execution resets dose
+        assert_eq!(get_player_dosimetry(uuid).dose, 0.0);
+
+        // Save & load session persistence
+        set_player_dose(uuid, 350.0);
+        let bytes = save_player_dosimetry(uuid);
+        let json = save_player_dosimetry_json(uuid);
+
+        reset_state();
+        assert_eq!(get_player_dosimetry(uuid).dose, 0.0);
+
+        // Restore from binary
+        assert!(load_player_dosimetry(uuid, &bytes));
+        assert!((get_player_dosimetry(uuid).dose - 350.0).abs() < EPSILON);
+
+        // Restore from JSON
+        reset_state();
+        assert!(load_player_dosimetry_json(uuid, &json));
+        assert!((get_player_dosimetry(uuid).dose - 350.0).abs() < EPSILON);
+
+        // Test on_player_death resets dose
+        on_player_death(uuid);
+        assert_eq!(get_player_dosimetry(uuid).dose, 0.0);
+
         reset_state();
     }
 }

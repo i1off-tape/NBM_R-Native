@@ -41,4 +41,5 @@ fn nbm_r_player_tick(game: &mut crate::game::Game<'_>) {
         hazmat_pieces,
         0.05,
     );
+    let _eval = crate::game::nbm_r::tick_player_sickness(who.uuid);
 }
