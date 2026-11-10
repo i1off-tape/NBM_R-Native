@@ -771,12 +771,208 @@ pub mod sickness {
     }
 }
 
+/// Interactive Geiger counter audio scheduling and HUD dosimeter dial simulation.
+pub mod geiger_hud {
+    use super::content;
+
+    pub const MIN_CLICK_INTERVAL: f32 = 0.05; // 20 clicks/sec at high radiation
+    pub const MAX_CLICK_INTERVAL: f32 = 1.25; // 0.8 clicks/sec at 0.1 Rad/s
+    pub const MIN_RAD_THRESHOLD: f32 = 1e-5;
+
+    pub const DEFAULT_MIN_ANGLE_DEG: f32 = -60.0;
+    pub const DEFAULT_MAX_ANGLE_DEG: f32 = 60.0;
+    pub const DEFAULT_MAX_RATE: f32 = 1000.0;
+    pub const DEFAULT_DAMPING: f32 = 8.0;
+
+    /// Calculate logarithmic click interval in seconds for an ambient radiation rate in Rad/s.
+    /// Returns `None` if radiation is zero or below the detection threshold.
+    /// Scales linearly with log10(ambient_rad) across the range [0.1, 1000.0] Rad/s.
+    pub fn geiger_click_interval(ambient_rad: f32) -> Option<f32> {
+        if ambient_rad < MIN_RAD_THRESHOLD {
+            return None;
+        }
+        let log_rad = ambient_rad.log10();
+        // Map log10 from [-1.0, 3.0] to [0.0, 1.0]
+        let norm = ((log_rad - (-1.0)) / (3.0 - (-1.0))).clamp(0.0, 1.0);
+        let interval = MAX_CLICK_INTERVAL - norm * (MAX_CLICK_INTERVAL - MIN_CLICK_INTERVAL);
+        Some(interval)
+    }
+
+    /// Calculate clicks per second (rate = 1 / interval) for ambient radiation.
+    pub fn geiger_click_rate(ambient_rad: f32) -> f32 {
+        match geiger_click_interval(ambient_rad) {
+            Some(interval) if interval > 0.0 => 1.0 / interval,
+            _ => 0.0,
+        }
+    }
+
+    /// Check if an item ID corresponds to a Geiger counter.
+    pub fn is_geiger_counter_item(item_id: &str) -> bool {
+        item_id == content::ITEM_GEIGER_COUNTER
+            || item_id == "ntm:geiger_counter"
+            || item_id == "ntm:item_geiger_counter"
+    }
+
+    /// Detect if a Geiger counter is held or present in an item collection.
+    pub fn has_geiger_counter<T: AsRef<str>>(items: impl IntoIterator<Item = T>) -> bool {
+        items.into_iter().any(|item| is_geiger_counter_item(item.as_ref()))
+    }
+
+    /// Calculate target needle angle in degrees from dose rate.
+    pub fn calculate_target_needle_angle(
+        dose_rate: f32,
+        max_rate: f32,
+        min_angle: f32,
+        max_angle: f32,
+    ) -> f32 {
+        if max_rate <= 0.0 {
+            return min_angle;
+        }
+        let fraction = (dose_rate / max_rate).clamp(0.0, 1.0);
+        min_angle + fraction * (max_angle - min_angle)
+    }
+
+    /// Standard target needle angle mapping [0.0, 1000.0] Rad/s to [-60.0, 60.0] degrees.
+    pub fn target_needle_angle(dose_rate: f32) -> f32 {
+        calculate_target_needle_angle(
+            dose_rate,
+            DEFAULT_MAX_RATE,
+            DEFAULT_MIN_ANGLE_DEG,
+            DEFAULT_MAX_ANGLE_DEG,
+        )
+    }
+
+    /// Smoothly interpolate needle angle towards target angle using exponential damping:
+    /// next = target + (current - target) * exp(-damping * dt)
+    pub fn interpolate_needle_angle(current_angle: f32, target_angle: f32, dt: f32) -> f32 {
+        interpolate_needle_angle_damped(current_angle, target_angle, dt, DEFAULT_DAMPING)
+    }
+
+    /// Smoothly interpolate needle angle with explicit damping factor.
+    pub fn interpolate_needle_angle_damped(
+        current_angle: f32,
+        target_angle: f32,
+        dt: f32,
+        damping: f32,
+    ) -> f32 {
+        if dt <= 0.0 {
+            return current_angle;
+        }
+        if (current_angle - target_angle).abs() < 1e-5 {
+            return target_angle;
+        }
+        let decay = (-damping * dt).exp();
+        target_angle + (current_angle - target_angle) * decay
+    }
+
+    /// Compute needle tip endpoint coordinates from center, length, and angle in degrees.
+    /// Angle 0 is straight up, positive is clockwise/right, negative is counter-clockwise/left.
+    pub fn compute_needle_endpoint(cx: f32, cy: f32, length: f32, angle_deg: f32) -> (f32, f32) {
+        let rad = angle_deg.to_radians();
+        let x = cx + length * rad.sin();
+        let y = cy - length * rad.cos();
+        (x, y)
+    }
+
+    /// Format absorbed dose for digital HUD readout.
+    pub fn format_absorbed_rad(rad: f32) -> String {
+        if rad < 10.0 {
+            format!("{:.2} Rad", rad)
+        } else if rad < 1000.0 {
+            format!("{:.1} Rad", rad)
+        } else {
+            format!("{:.0} Rad", rad)
+        }
+    }
+
+    /// Return ARGB text color for radiation dose severity.
+    pub fn dose_status_color(rad: f32) -> u32 {
+        if rad < 200.0 {
+            0xFF55FF55 // Safe Green
+        } else if rad < 500.0 {
+            0xFFFFFF55 // Warning Yellow
+        } else if rad < 1000.0 {
+            0xFFFF9933 // Danger Orange
+        } else {
+            0xFFFF3333 // Lethal Red
+        }
+    }
+
+    /// Calculate effective audio volume taking into account master and category sound settings.
+    pub fn effective_audio_volume(base: f32, master: f32, category: f32) -> f32 {
+        base.clamp(0.0, 1.0) * master.clamp(0.0, 1.0) * category.clamp(0.0, 1.0)
+    }
+
+    /// Client state for Geiger click audio scheduling.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct GeigerAudioState {
+        /// Accumulated time in seconds since last click.
+        pub accumulator: f32,
+    }
+
+    impl Default for GeigerAudioState {
+        fn default() -> Self {
+            Self { accumulator: 0.0 }
+        }
+    }
+
+    impl GeigerAudioState {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Advance timer by `dt` seconds given `ambient_rad`.
+        /// Returns `true` if a click sound should be played.
+        pub fn tick(&mut self, ambient_rad: f32, dt: f32) -> bool {
+            let Some(interval) = geiger_click_interval(ambient_rad) else {
+                self.accumulator = 0.0;
+                return false;
+            };
+
+            self.accumulator += dt;
+            if self.accumulator >= interval {
+                self.accumulator %= interval;
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    /// Client state for HUD needle animation.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct GeigerHudState {
+        pub current_needle_angle: f32,
+    }
+
+    impl Default for GeigerHudState {
+        fn default() -> Self {
+            Self {
+                current_needle_angle: DEFAULT_MIN_ANGLE_DEG,
+            }
+        }
+    }
+
+    impl GeigerHudState {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn update(&mut self, target_angle: f32, dt: f32) {
+            self.current_needle_angle =
+                interpolate_needle_angle(self.current_needle_angle, target_angle, dt);
+        }
+    }
+}
+
 // Module-level thread-safe state trackers
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 static WORLD_TRACKER: Mutex<Option<dosimetry::WorldRadiationTracker>> = Mutex::new(None);
 static PLAYER_DOSES: Mutex<Option<HashMap<u128, dosimetry::PlayerDosimetryData>>> = Mutex::new(None);
+static GEIGER_AUDIO: Mutex<Option<geiger_hud::GeigerAudioState>> = Mutex::new(None);
+static GEIGER_HUD: Mutex<Option<geiger_hud::GeigerHudState>> = Mutex::new(None);
 
 pub fn lock_tracker<F, R>(f: F) -> R
 where
@@ -796,12 +992,34 @@ where
     f(map)
 }
 
+pub fn lock_geiger_audio<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut geiger_hud::GeigerAudioState) -> R,
+{
+    let mut guard = GEIGER_AUDIO.lock().unwrap_or_else(|e| e.into_inner());
+    let state = guard.get_or_insert_with(geiger_hud::GeigerAudioState::new);
+    f(state)
+}
+
+pub fn lock_geiger_hud<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut geiger_hud::GeigerHudState) -> R,
+{
+    let mut guard = GEIGER_HUD.lock().unwrap_or_else(|e| e.into_inner());
+    let state = guard.get_or_insert_with(geiger_hud::GeigerHudState::new);
+    f(state)
+}
+
 /// Reset world radiation and player dosimetry state (useful for tests and level unloading).
 pub fn reset_state() {
     let mut w = WORLD_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
     *w = None;
     let mut p = PLAYER_DOSES.lock().unwrap_or_else(|e| e.into_inner());
     *p = None;
+    let mut a = GEIGER_AUDIO.lock().unwrap_or_else(|e| e.into_inner());
+    *a = None;
+    let mut h = GEIGER_HUD.lock().unwrap_or_else(|e| e.into_inner());
+    *h = None;
 }
 
 pub fn on_chunk_load(dimension: &str, chunk: [i32; 2]) {
@@ -1585,5 +1803,144 @@ mod tests {
         assert_eq!(get_player_dosimetry(uuid).dose, 0.0);
 
         reset_state();
+    }
+
+    #[test]
+    fn test_geiger_click_interval_logarithmic_scaling() {
+        // Radiation intensities: 0, 0.1, 1.0, 10.0, 100.0, 1000.0 Rad/s
+        assert_eq!(geiger_hud::geiger_click_interval(0.0), None);
+        assert_eq!(geiger_hud::geiger_click_interval(-5.0), None);
+        assert_eq!(geiger_hud::geiger_click_interval(1e-6), None);
+
+        let t_0_1 = geiger_hud::geiger_click_interval(0.1).expect("0.1 Rad/s must have interval");
+        let t_1_0 = geiger_hud::geiger_click_interval(1.0).expect("1.0 Rad/s must have interval");
+        let t_10_0 = geiger_hud::geiger_click_interval(10.0).expect("10.0 Rad/s must have interval");
+        let t_100_0 = geiger_hud::geiger_click_interval(100.0).expect("100.0 Rad/s must have interval");
+        let t_1000_0 = geiger_hud::geiger_click_interval(1000.0).expect("1000.0 Rad/s must have interval");
+
+        // Intervals must be strictly decreasing as radiation intensity increases
+        assert!(t_0_1 > t_1_0);
+        assert!(t_1_0 > t_10_0);
+        assert!(t_10_0 > t_100_0);
+        assert!(t_100_0 > t_1000_0);
+
+        // Verification of logarithmic decrement across each decade
+        let delta_1 = t_0_1 - t_1_0;
+        let delta_2 = t_1_0 - t_10_0;
+        let delta_3 = t_10_0 - t_100_0;
+        let delta_4 = t_100_0 - t_1000_0;
+
+        assert!((delta_1 - delta_2).abs() < 1e-4);
+        assert!((delta_2 - delta_3).abs() < 1e-4);
+        assert!((delta_3 - delta_4).abs() < 1e-4);
+        assert!((delta_1 - 0.30).abs() < 1e-4); // (1.25 - 0.05) / 4 = 0.30
+
+        // Test click rates
+        assert_eq!(geiger_hud::geiger_click_rate(0.0), 0.0);
+        assert!((geiger_hud::geiger_click_rate(1000.0) - 20.0).abs() < 1e-2);
+
+        // Test GeigerAudioState ticking over time
+        let mut audio_state = geiger_hud::GeigerAudioState::new();
+        // At 0 Rad/s, ticking never triggers clicks
+        for _ in 0..100 {
+            assert!(!audio_state.tick(0.0, 0.05));
+        }
+
+        // At 1000 Rad/s (interval = 0.05s, i.e. 1 tick per click)
+        let mut clicks = 0;
+        for _ in 0..20 {
+            if audio_state.tick(1000.0, 0.05) {
+                clicks += 1;
+            }
+        }
+        assert_eq!(clicks, 20); // Exactly 20 clicks in 20 ticks (1 second)
+    }
+
+    #[test]
+    fn test_needle_angle_calculations_and_smooth_interpolation() {
+        // Target needle angles: mapping [0.0, 1000.0] -> [-60.0, 60.0]
+        assert!((geiger_hud::target_needle_angle(0.0) - (-60.0)).abs() < EPSILON);
+        assert!((geiger_hud::target_needle_angle(500.0) - 0.0).abs() < EPSILON);
+        assert!((geiger_hud::target_needle_angle(1000.0) - 60.0).abs() < EPSILON);
+        // Clamped at upper bound
+        assert!((geiger_hud::target_needle_angle(2000.0) - 60.0).abs() < EPSILON);
+
+        // Interpolation with dt = 0
+        let current = -30.0;
+        let target = 30.0;
+        assert_eq!(geiger_hud::interpolate_needle_angle(current, target, 0.0), current);
+
+        // Interpolation step forward (no overshoot)
+        let step1 = geiger_hud::interpolate_needle_angle(current, target, 0.05);
+        assert!(step1 > current);
+        assert!(step1 <= target);
+
+        // Interpolation step backward (no overshoot)
+        let step_back = geiger_hud::interpolate_needle_angle(30.0, -30.0, 0.05);
+        assert!(step_back < 30.0);
+        assert!(step_back >= -30.0);
+
+        // Smooth convergence over time (dt = 0.05, 20 steps = 1 second)
+        let mut angle = -60.0;
+        let target = 45.0;
+        for _ in 0..40 {
+            angle = geiger_hud::interpolate_needle_angle(angle, target, 0.05);
+        }
+        assert!((angle - target).abs() < 0.01);
+
+        // Needle endpoint trigonometry
+        let (cx, cy) = (50.0, 50.0);
+        let len = 20.0;
+        let (x_up, y_up) = geiger_hud::compute_needle_endpoint(cx, cy, len, 0.0);
+        assert!((x_up - 50.0).abs() < EPSILON);
+        assert!((y_up - 30.0).abs() < EPSILON);
+
+        let (x_right, y_right) = geiger_hud::compute_needle_endpoint(cx, cy, len, 90.0);
+        assert!((x_right - 70.0).abs() < EPSILON);
+        assert!((y_right - 50.0).abs() < EPSILON);
+
+        let (x_left, y_left) = geiger_hud::compute_needle_endpoint(cx, cy, len, -90.0);
+        assert!((x_left - 30.0).abs() < EPSILON);
+        assert!((y_left - 50.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_geiger_counter_detection() {
+        assert!(geiger_hud::is_geiger_counter_item("nbm_r:geiger_counter"));
+        assert!(geiger_hud::is_geiger_counter_item("ntm:geiger_counter"));
+        assert!(geiger_hud::is_geiger_counter_item("ntm:item_geiger_counter"));
+        assert!(!geiger_hud::is_geiger_counter_item("nbm_r:uranium_ingot"));
+        assert!(!geiger_hud::is_geiger_counter_item("minecraft:compass"));
+
+        let hotbar_with_geiger = ["minecraft:iron_sword", "nbm_r:geiger_counter", "minecraft:bread"];
+        assert!(geiger_hud::has_geiger_counter(hotbar_with_geiger.iter().copied()));
+
+        let hotbar_without_geiger = ["minecraft:iron_sword", "minecraft:bread"];
+        assert!(!geiger_hud::has_geiger_counter(hotbar_without_geiger.iter().copied()));
+
+        let empty_inventory: [&str; 0] = [];
+        assert!(!geiger_hud::has_geiger_counter(empty_inventory.iter().copied()));
+    }
+
+    #[test]
+    fn test_audio_volume_and_hud_formatting() {
+        // Volume calculation
+        assert!((geiger_hud::effective_audio_volume(1.0, 0.8, 0.5) - 0.40).abs() < EPSILON);
+        assert_eq!(geiger_hud::effective_audio_volume(1.0, 0.0, 1.0), 0.0);
+        assert_eq!(geiger_hud::effective_audio_volume(1.0, 1.0, 0.0), 0.0);
+        // Clamping bounds
+        assert!((geiger_hud::effective_audio_volume(2.0, 1.5, 1.2) - 1.0).abs() < EPSILON);
+
+        // Readout formatting
+        assert_eq!(geiger_hud::format_absorbed_rad(0.0), "0.00 Rad");
+        assert_eq!(geiger_hud::format_absorbed_rad(4.567), "4.57 Rad");
+        assert_eq!(geiger_hud::format_absorbed_rad(150.25), "150.2 Rad");
+        assert_eq!(geiger_hud::format_absorbed_rad(1250.0), "1250 Rad");
+
+        // Dose status colors
+        assert_eq!(geiger_hud::dose_status_color(50.0), 0xFF55FF55); // Green
+        assert_eq!(geiger_hud::dose_status_color(250.0), 0xFFFFFF55); // Yellow
+        assert_eq!(geiger_hud::dose_status_color(750.0), 0xFFFF9933); // Orange
+        assert_eq!(geiger_hud::dose_status_color(1500.0), 0xFFFF3333); // Red
     }
 }
