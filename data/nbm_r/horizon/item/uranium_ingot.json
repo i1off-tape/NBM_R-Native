@@ -1,11 +1,5 @@
 {
   "template": "minecraft:iron_ingot",
   "max_stack_size": 64,
-  "rarity": "rare",
-  "components": {
-    "minecraft:custom_data": {
-      "radiation": 1.5,
-      "rad_per_sec": 1.5
-    }
-  }
+  "rarity": "rare"
 }

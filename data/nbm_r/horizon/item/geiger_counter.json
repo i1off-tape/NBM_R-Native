@@ -1,11 +1,5 @@
 {
   "template": "minecraft:compass",
   "max_stack_size": 1,
-  "rarity": "uncommon",
-  "components": {
-    "minecraft:custom_data": {
-      "tool_type": "diagnostic",
-      "diagnostic": "geiger_counter"
-    }
-  }
+  "rarity": "uncommon"
 }
