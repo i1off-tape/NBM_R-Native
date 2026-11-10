@@ -238,6 +238,25 @@ pub mod content {
             0.0
         }
     }
+
+    /// Calculate total radiation emission from an iterator of item IDs and counts.
+    pub fn total_item_radiation<'a, I>(stacks: I) -> f32
+    where
+        I: IntoIterator<Item = (&'a str, u32)>,
+    {
+        stacks
+            .into_iter()
+            .filter(|&(_, count)| count > 0)
+            .map(|(item, count)| item_radiation_emission(item) * count as f32)
+            .sum()
+    }
+}
+
+pub fn total_item_radiation<'a, I>(stacks: I) -> f32
+where
+    I: IntoIterator<Item = (&'a str, u32)>,
+{
+    content::total_item_radiation(stacks)
 }
 
 pub const ID: &str = content::ID;
@@ -1140,6 +1159,7 @@ mod tests {
     use std::collections::HashMap;
 
     const EPSILON: f32 = 1e-4;
+    static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn formats_break_message() {
@@ -1588,6 +1608,7 @@ mod tests {
 
     #[test]
     fn test_runtime_state_integration() {
+        let _lock = TEST_MUTEX.lock().unwrap();
         reset_state();
         let dim = "minecraft:overworld";
         let uuid = 42u128;
@@ -1753,6 +1774,7 @@ mod tests {
 
     #[test]
     fn test_player_sickness_tick_state_integration() {
+        let _lock = TEST_MUTEX.lock().unwrap();
         reset_state();
         let uuid = 9999u128;
 
@@ -1818,7 +1840,7 @@ mod tests {
         let t_100_0 = geiger_hud::geiger_click_interval(100.0).expect("100.0 Rad/s must have interval");
         let t_1000_0 = geiger_hud::geiger_click_interval(1000.0).expect("1000.0 Rad/s must have interval");
 
-        // Intervals must be strictly decreasing as radiation intensity increases
+        // Intervals must be strictly decreasing as radiation rate increases
         assert!(t_0_1 > t_1_0);
         assert!(t_1_0 > t_10_0);
         assert!(t_10_0 > t_100_0);
@@ -1942,5 +1964,17 @@ mod tests {
         assert_eq!(geiger_hud::dose_status_color(250.0), 0xFFFFFF55); // Yellow
         assert_eq!(geiger_hud::dose_status_color(750.0), 0xFFFF9933); // Orange
         assert_eq!(geiger_hud::dose_status_color(1500.0), 0xFFFF3333); // Red
+    }
+
+    #[test]
+    fn test_total_item_radiation() {
+        let items = [
+            (content::ITEM_URANIUM_INGOT, 2),
+            (content::BLOCK_URANIUM_ORE, 4),
+            ("minecraft:stick", 64),
+        ];
+        let total = total_item_radiation(items.iter().map(|&(id, cnt)| (id, cnt)));
+        let expected = 2.0 * content::URANIUM_INGOT_RAD_PER_SEC + 4.0 * content::URANIUM_ORE_RAD_PER_SEC;
+        assert!((total - expected).abs() < EPSILON);
     }
 }

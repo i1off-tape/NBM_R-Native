@@ -37,19 +37,13 @@ fn nbm_r_hud(
     let (cx, cz) = crate::game::nbm_r::dosimetry::pos_to_chunk(p.x, p.z);
     let chunk_rad = crate::game::nbm_r::get_chunk_radiation(&p.dimension, cx, cz);
 
-    let mut inv_emission = 0.0;
-    for stack in game.inventory.iter().flatten() {
-        if stack.count > 0 {
-            inv_emission +=
-                crate::game::nbm_r::content::item_radiation_emission(&stack.item) * stack.count as f32;
-        }
-    }
-    if let Some(stack) = &game.offhand {
-        if stack.count > 0 {
-            inv_emission +=
-                crate::game::nbm_r::content::item_radiation_emission(&stack.item) * stack.count as f32;
-        }
-    }
+    let inv_emission = crate::game::nbm_r::total_item_radiation(
+        game.inventory
+            .iter()
+            .flatten()
+            .chain(game.offhand.as_ref())
+            .map(|s| (s.item.as_ref(), s.count)),
+    );
     let ambient_rate = chunk_rad + inv_emission;
 
     let target_angle = crate::game::nbm_r::geiger_hud::target_needle_angle(ambient_rate);

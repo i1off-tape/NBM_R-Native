@@ -18,25 +18,19 @@ fn nbm_r_tick(game: &mut crate::game::Game<'_>) {
             }
         }
 
-        let mut items: Vec<(String, u32)> = Vec::new();
-        for stack in game.inventory.iter().flatten() {
-            let emission = crate::game::nbm_r::content::item_radiation_emission(&stack.item);
-            if emission > 0.0 && stack.count > 0 {
-                items.push((stack.item.to_string(), stack.count));
-            }
-        }
-        if let Some(stack) = &game.offhand {
-            let emission = crate::game::nbm_r::content::item_radiation_emission(&stack.item);
-            if emission > 0.0 && stack.count > 0 {
-                items.push((stack.item.to_string(), stack.count));
-            }
-        }
+        let items_iter = game
+            .inventory
+            .iter()
+            .flatten()
+            .chain(game.offhand.as_ref())
+            .map(|s| (s.item.as_ref(), s.count));
+        let items_vec: Vec<(&str, u32)> = items_iter.collect();
+        let inv_emission = crate::game::nbm_r::total_item_radiation(items_vec.iter().copied());
 
-        let items_ref: Vec<(&str, u32)> = items.iter().map(|(id, cnt)| (id.as_str(), *cnt)).collect();
         crate::game::nbm_r::record_player_exposure(
             0,
             chunk_rad,
-            &items_ref,
+            &items_vec,
             hazmat_pieces,
             0.05,
         );
@@ -64,20 +58,13 @@ fn nbm_r_tick(game: &mut crate::game::Game<'_>) {
                 let (cx, cz) = crate::game::nbm_r::dosimetry::pos_to_chunk(p.x, p.z);
                 let chunk_rad = crate::game::nbm_r::get_chunk_radiation(&p.dimension, cx, cz);
 
-                let mut inv_emission = 0.0;
-                for stack in game.inventory.iter().flatten() {
-                    if stack.count > 0 {
-                        inv_emission +=
-                            crate::game::nbm_r::content::item_radiation_emission(&stack.item) * stack.count as f32;
-                    }
-                }
-                if let Some(stack) = &game.offhand {
-                    if stack.count > 0 {
-                        inv_emission +=
-                            crate::game::nbm_r::content::item_radiation_emission(&stack.item) * stack.count as f32;
-                    }
-                }
-
+                let inv_emission = crate::game::nbm_r::total_item_radiation(
+                    game.inventory
+                        .iter()
+                        .flatten()
+                        .chain(game.offhand.as_ref())
+                        .map(|s| (s.item.as_ref(), s.count)),
+                );
                 let ambient_rad = chunk_rad + inv_emission;
 
                 let master_vol = game.settings.master_volume;
