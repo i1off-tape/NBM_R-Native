@@ -104,3 +104,20 @@ python3 tools/package.py
 - `PORTING_GUIDE.md`: Comprehensive, subsystem-by-subsystem migration roadmap.
 - `MAPPING.md`: Exact mapping table between Java classes/packages and Rust targets.
 - `compatibility.json`: Locked commit hashes of Horizon and horizon-mixins.
+
+
+---
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical names, unchanged. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout at repo root. See `docs/agents/domain.md`.
