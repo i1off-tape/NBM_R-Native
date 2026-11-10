@@ -240,6 +240,367 @@ pub mod content {
     }
 }
 
+pub const ID: &str = content::ID;
+
+/// World chunk tracking and player dosimetry simulation.
+pub mod dosimetry {
+    use std::collections::{HashMap, HashSet};
+    use super::content;
+    use super::radiation;
+
+    /// Chunk radiation state storing ambient Rad and particulate Fallout.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct ChunkRadiationData {
+        pub rad: f32,
+        pub fallout: f32,
+    }
+
+    impl ChunkRadiationData {
+        pub const fn new(rad: f32, fallout: f32) -> Self {
+            Self { rad, fallout }
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.rad <= 0.0 && self.fallout <= 0.0
+        }
+
+        /// 8-byte little-endian binary serialization: [rad: 4 bytes, fallout: 4 bytes].
+        pub fn to_bytes(&self) -> [u8; 8] {
+            let mut bytes = [0u8; 8];
+            bytes[0..4].copy_from_slice(&self.rad.to_le_bytes());
+            bytes[4..8].copy_from_slice(&self.fallout.to_le_bytes());
+            bytes
+        }
+
+        /// Deserialize from 8-byte little-endian slice.
+        pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+            if bytes.len() < 8 {
+                return None;
+            }
+            let rad = f32::from_le_bytes(bytes[0..4].try_into().ok()?);
+            let fallout = f32::from_le_bytes(bytes[4..8].try_into().ok()?);
+            Some(Self { rad, fallout })
+        }
+
+        /// Deterministic JSON format for human-readable debugging / storage.
+        pub fn to_json(&self) -> String {
+            format!(r#"{{"rad":{:.4},"fallout":{:.4}}}"#, self.rad, self.fallout)
+        }
+
+        /// Parse from JSON string.
+        pub fn from_json(s: &str) -> Option<Self> {
+            let s = s.trim();
+            let rad_idx = s.find("\"rad\":")?;
+            let after_rad = &s[rad_idx + 6..];
+            let rad_end = after_rad.find(|c: char| c == ',' || c == '}')?;
+            let rad: f32 = after_rad[..rad_end].trim().parse().ok()?;
+
+            let fallout_idx = s.find("\"fallout\":")?;
+            let after_fallout = &s[fallout_idx + 10..];
+            let fallout_end = after_fallout.find(|c: char| c == ',' || c == '}')?;
+            let fallout: f32 = after_fallout[..fallout_end].trim().parse().ok()?;
+
+            Some(Self { rad, fallout })
+        }
+    }
+
+    /// Player absorbed dose tracking.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct PlayerDosimetryData {
+        /// Accumulated absorbed dose in Rad.
+        pub dose: f32,
+        /// Last measured ambient dose rate at player position (Rad/s).
+        pub last_ambient_rate: f32,
+        /// Last measured absorbed dose rate after armor attenuation (Rad/s).
+        pub last_absorbed_rate: f32,
+    }
+
+    impl PlayerDosimetryData {
+        pub const fn new(dose: f32) -> Self {
+            Self {
+                dose,
+                last_ambient_rate: 0.0,
+                last_absorbed_rate: 0.0,
+            }
+        }
+    }
+
+    /// World-level radiation tracking across dimensions and chunks.
+    #[derive(Clone, Debug, Default)]
+    pub struct WorldRadiationTracker {
+        /// Chunks currently loaded by dimension and chunk coordinate (cx, cz).
+        pub loaded_chunks: HashMap<String, HashSet<(i32, i32)>>,
+        /// Chunk radiation storage per dimension and chunk coordinate (cx, cz).
+        pub chunk_data: HashMap<(String, i32, i32), ChunkRadiationData>,
+    }
+
+    impl WorldRadiationTracker {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Register chunk as loaded.
+        pub fn on_chunk_load(&mut self, dimension: &str, cx: i32, cz: i32) {
+            self.loaded_chunks
+                .entry(dimension.to_owned())
+                .or_default()
+                .insert((cx, cz));
+        }
+
+        /// Register chunk as unloaded.
+        pub fn on_chunk_unload(&mut self, dimension: &str, cx: i32, cz: i32) {
+            if let Some(set) = self.loaded_chunks.get_mut(dimension) {
+                set.remove(&(cx, cz));
+            }
+        }
+
+        /// Check if a chunk is currently loaded.
+        pub fn is_chunk_loaded(&self, dimension: &str, cx: i32, cz: i32) -> bool {
+            self.loaded_chunks
+                .get(dimension)
+                .map_or(false, |set| set.contains(&(cx, cz)))
+        }
+
+        /// Get radiation data for a chunk.
+        pub fn get_chunk_data(&self, dimension: &str, cx: i32, cz: i32) -> ChunkRadiationData {
+            self.chunk_data
+                .get(&(dimension.to_owned(), cx, cz))
+                .copied()
+                .unwrap_or_default()
+        }
+
+        /// Set radiation data for a chunk.
+        pub fn set_chunk_data(
+            &mut self,
+            dimension: &str,
+            cx: i32,
+            cz: i32,
+            data: ChunkRadiationData,
+        ) {
+            let key = (dimension.to_owned(), cx, cz);
+            if data.is_empty() {
+                self.chunk_data.remove(&key);
+            } else {
+                self.chunk_data.insert(key, data);
+            }
+        }
+
+        /// Add radiation to a specific chunk.
+        pub fn add_radiation(&mut self, dimension: &str, cx: i32, cz: i32, amount: f32) {
+            if amount <= 0.0 {
+                return;
+            }
+            let key = (dimension.to_owned(), cx, cz);
+            let entry = self.chunk_data.entry(key).or_default();
+            entry.rad = (entry.rad + amount).clamp(0.0, radiation::MAX_CHUNK_RADIATION);
+        }
+
+        /// Add fallout to a specific chunk.
+        pub fn add_fallout(&mut self, dimension: &str, cx: i32, cz: i32, amount: f32) {
+            if amount <= 0.0 {
+                return;
+            }
+            let key = (dimension.to_owned(), cx, cz);
+            let entry = self.chunk_data.entry(key).or_default();
+            entry.fallout = (entry.fallout + amount).clamp(0.0, radiation::MAX_CHUNK_FALLOUT);
+        }
+
+        /// Execute a post-level tick step for a dimension:
+        /// 1. Collects all chunks in this dimension with radiation > 0.
+        /// 2. Performs neighbor diffusion and decay via pure math engine `diffuse_and_decay_chunk_radiation_map`.
+        /// 3. Performs fallout decay via `decay_fallout`.
+        /// 4. Updates active irradiated chunks in storage.
+        pub fn tick_level(&mut self, dimension: &str, is_raining: bool) {
+            let mut active_rad_map = HashMap::new();
+            for (&(ref dim, cx, cz), data) in &self.chunk_data {
+                if dim == dimension && data.rad > 0.0 {
+                    active_rad_map.insert((cx, cz), data.rad);
+                }
+            }
+
+            let next_rad_map = if !active_rad_map.is_empty() {
+                radiation::diffuse_and_decay_chunk_radiation_map(&active_rad_map)
+            } else {
+                HashMap::new()
+            };
+
+            let mut coords: HashSet<(i32, i32)> = HashSet::new();
+            for &(ref dim, cx, cz) in self.chunk_data.keys() {
+                if dim == dimension {
+                    coords.insert((cx, cz));
+                }
+            }
+            for &coord in next_rad_map.keys() {
+                coords.insert(coord);
+            }
+
+            for (cx, cz) in coords {
+                let key = (dimension.to_owned(), cx, cz);
+                let current_fallout = self.chunk_data.get(&key).map_or(0.0, |d| d.fallout);
+                let new_rad = next_rad_map.get(&(cx, cz)).copied().unwrap_or(0.0);
+                let new_fallout = radiation::decay_fallout(current_fallout, is_raining);
+
+                if new_rad <= 0.0 && new_fallout <= 0.0 {
+                    self.chunk_data.remove(&key);
+                } else {
+                    self.chunk_data.insert(
+                        key,
+                        ChunkRadiationData {
+                            rad: new_rad,
+                            fallout: new_fallout,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    /// Calculate total ambient dose rate (Rad/s) at player position:
+    /// ambient_chunk_rad + inventory items emission.
+    pub fn calculate_ambient_exposure(
+        chunk_rad: f32,
+        inventory_items: &[(&str, u32)],
+    ) -> f32 {
+        let mut total = chunk_rad.max(0.0);
+        for &(item_id, count) in inventory_items {
+            let emission = content::item_radiation_emission(item_id);
+            if emission > 0.0 && count > 0 {
+                total += emission * count as f32;
+            }
+        }
+        total
+    }
+
+    /// Calculate absorbed dose rate (Rad/s) after hazmat armor attenuation.
+    /// Wearing 4 hazmat pieces reduces dose by 99% (multiplier 0.01).
+    pub fn calculate_absorbed_exposure(ambient_rad_rate: f32, hazmat_pieces: usize) -> f32 {
+        radiation::calculate_hazmat_attenuation(ambient_rad_rate, hazmat_pieces)
+    }
+
+    /// Advance dose accumulation for a player over `delta_seconds` (e.g. 0.05 for 1 tick).
+    pub fn step_player_dosimetry(
+        dosimetry: &mut PlayerDosimetryData,
+        chunk_rad: f32,
+        inventory_items: &[(&str, u32)],
+        hazmat_pieces: usize,
+        delta_seconds: f32,
+    ) -> f32 {
+        let ambient_rate = calculate_ambient_exposure(chunk_rad, inventory_items);
+        let absorbed_rate = calculate_absorbed_exposure(ambient_rate, hazmat_pieces);
+        dosimetry.last_ambient_rate = ambient_rate;
+        dosimetry.last_absorbed_rate = absorbed_rate;
+        dosimetry.dose += absorbed_rate * delta_seconds;
+        absorbed_rate
+    }
+
+    /// Convert block world coordinate to chunk coordinate (cx, cz).
+    pub fn block_to_chunk(x: i32, z: i32) -> (i32, i32) {
+        (x.div_euclid(16), z.div_euclid(16))
+    }
+
+    /// Convert entity continuous coordinates to chunk coordinate (cx, cz).
+    pub fn pos_to_chunk(x: f64, z: f64) -> (i32, i32) {
+        let ix = x.floor() as i32;
+        let iz = z.floor() as i32;
+        (ix.div_euclid(16), iz.div_euclid(16))
+    }
+}
+
+// Module-level thread-safe state trackers
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+static WORLD_TRACKER: Mutex<Option<dosimetry::WorldRadiationTracker>> = Mutex::new(None);
+static PLAYER_DOSES: Mutex<Option<HashMap<u128, dosimetry::PlayerDosimetryData>>> = Mutex::new(None);
+
+pub fn lock_tracker<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut dosimetry::WorldRadiationTracker) -> R,
+{
+    let mut guard = WORLD_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
+    let tracker = guard.get_or_insert_with(dosimetry::WorldRadiationTracker::new);
+    f(tracker)
+}
+
+pub fn lock_players<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut HashMap<u128, dosimetry::PlayerDosimetryData>) -> R,
+{
+    let mut guard = PLAYER_DOSES.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    f(map)
+}
+
+/// Reset world radiation and player dosimetry state (useful for tests and level unloading).
+pub fn reset_state() {
+    let mut w = WORLD_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
+    *w = None;
+    let mut p = PLAYER_DOSES.lock().unwrap_or_else(|e| e.into_inner());
+    *p = None;
+}
+
+pub fn on_chunk_load(dimension: &str, chunk: [i32; 2]) {
+    lock_tracker(|t| t.on_chunk_load(dimension, chunk[0], chunk[1]));
+}
+
+pub fn on_chunk_unload(dimension: &str, chunk: [i32; 2]) {
+    lock_tracker(|t| t.on_chunk_unload(dimension, chunk[0], chunk[1]));
+}
+
+pub fn on_level_tick(dimension: &str) {
+    lock_tracker(|t| t.tick_level(dimension, false));
+}
+
+pub fn get_chunk_radiation(dimension: &str, cx: i32, cz: i32) -> f32 {
+    lock_tracker(|t| t.get_chunk_data(dimension, cx, cz).rad)
+}
+
+pub fn set_chunk_radiation(dimension: &str, cx: i32, cz: i32, rad: f32) {
+    lock_tracker(|t| {
+        let mut data = t.get_chunk_data(dimension, cx, cz);
+        data.rad = rad;
+        t.set_chunk_data(dimension, cx, cz, data);
+    });
+}
+
+pub fn get_chunk_data(dimension: &str, cx: i32, cz: i32) -> dosimetry::ChunkRadiationData {
+    lock_tracker(|t| t.get_chunk_data(dimension, cx, cz))
+}
+
+pub fn set_chunk_data(dimension: &str, cx: i32, cz: i32, data: dosimetry::ChunkRadiationData) {
+    lock_tracker(|t| t.set_chunk_data(dimension, cx, cz, data));
+}
+
+pub fn get_player_dosimetry(uuid: u128) -> dosimetry::PlayerDosimetryData {
+    lock_players(|m| m.get(&uuid).copied().unwrap_or_default())
+}
+
+pub fn set_player_dose(uuid: u128, dose: f32) {
+    lock_players(|m| {
+        let entry = m.entry(uuid).or_default();
+        entry.dose = dose;
+    });
+}
+
+pub fn record_player_exposure(
+    uuid: u128,
+    chunk_rad: f32,
+    inventory_items: &[(&str, u32)],
+    hazmat_pieces: usize,
+    delta_seconds: f32,
+) -> f32 {
+    lock_players(|m| {
+        let entry = m.entry(uuid).or_default();
+        dosimetry::step_player_dosimetry(
+            entry,
+            chunk_rad,
+            inventory_items,
+            hazmat_pieces,
+            delta_seconds,
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,5 +857,234 @@ mod tests {
         assert_eq!(content::URANIUM_INGOT_MAX_STACK, 64);
         assert_eq!(content::GEIGER_COUNTER_MAX_STACK, 1);
         assert_eq!(content::HAZMAT_PIECE_MAX_STACK, 1);
+    }
+
+    #[test]
+    fn test_chunk_radiation_data_serialization() {
+        let original = dosimetry::ChunkRadiationData::new(123.456, 78.901);
+        assert!(!original.is_empty());
+
+        // Binary 8-byte round trip
+        let bytes = original.to_bytes();
+        assert_eq!(bytes.len(), 8);
+        let restored = dosimetry::ChunkRadiationData::from_bytes(&bytes).expect("valid bytes");
+        assert!((restored.rad - original.rad).abs() < EPSILON);
+        assert!((restored.fallout - original.fallout).abs() < EPSILON);
+
+        // JSON round trip
+        let json_str = original.to_json();
+        assert!(json_str.contains("\"rad\":"));
+        assert!(json_str.contains("\"fallout\":"));
+        let json_restored = dosimetry::ChunkRadiationData::from_json(&json_str).expect("valid json");
+        assert!((json_restored.rad - original.rad).abs() < 1e-3);
+        assert!((json_restored.fallout - original.fallout).abs() < 1e-3);
+
+        // Empty data check
+        let empty = dosimetry::ChunkRadiationData::default();
+        assert!(empty.is_empty());
+        assert_eq!(dosimetry::ChunkRadiationData::from_bytes(&[0; 4]), None);
+    }
+
+    #[test]
+    fn test_world_radiation_tracker_lifecycle() {
+        let mut tracker = dosimetry::WorldRadiationTracker::new();
+        let dim = "minecraft:overworld";
+
+        // Chunk load / unload
+        assert!(!tracker.is_chunk_loaded(dim, 2, 3));
+        tracker.on_chunk_load(dim, 2, 3);
+        assert!(tracker.is_chunk_loaded(dim, 2, 3));
+        tracker.on_chunk_unload(dim, 2, 3);
+        assert!(!tracker.is_chunk_loaded(dim, 2, 3));
+
+        // Add radiation & fallout
+        tracker.add_radiation(dim, 0, 0, 100.0);
+        tracker.add_fallout(dim, 0, 0, 50.0);
+        let data = tracker.get_chunk_data(dim, 0, 0);
+        assert_eq!(data.rad, 100.0);
+        assert_eq!(data.fallout, 50.0);
+
+        // Clamping to MAX
+        tracker.add_radiation(dim, 0, 0, 200_000.0);
+        assert_eq!(tracker.get_chunk_data(dim, 0, 0).rad, radiation::MAX_CHUNK_RADIATION);
+
+        // Empty removal
+        tracker.set_chunk_data(dim, 0, 0, dosimetry::ChunkRadiationData::default());
+        assert_eq!(tracker.get_chunk_data(dim, 0, 0), dosimetry::ChunkRadiationData::default());
+    }
+
+    #[test]
+    fn test_world_tracker_tick_level_diffusion_and_decay() {
+        let mut tracker = dosimetry::WorldRadiationTracker::new();
+        let dim = "minecraft:overworld";
+
+        // Irradiate center chunk (0, 0)
+        tracker.set_chunk_data(
+            dim,
+            0,
+            0,
+            dosimetry::ChunkRadiationData::new(100.0, 50.0),
+        );
+
+        // Run level tick (decay and diffusion)
+        tracker.tick_level(dim, false);
+
+        // Center chunk: 100.0 * 0.60 = 60.0 -> decayed: 60.0 * 0.99 - 0.05 = 59.35
+        let center = tracker.get_chunk_data(dim, 0, 0);
+        assert!((center.rad - 59.35).abs() < EPSILON);
+        // Fallout decayed (dry): 50.0 * 0.9995 - 0.01 = 49.965
+        assert!((center.fallout - 49.965).abs() < EPSILON);
+
+        // Diffused cardinal neighbor (1, 0): 100.0 * 0.075 = 7.5 -> decayed: 7.375
+        let cardinal = tracker.get_chunk_data(dim, 1, 0);
+        assert!((cardinal.rad - 7.375).abs() < EPSILON);
+
+        // Diffused diagonal neighbor (1, 1): 100.0 * 0.025 = 2.5 -> decayed: 2.425
+        let diagonal = tracker.get_chunk_data(dim, 1, 1);
+        assert!((diagonal.rad - 2.425).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_player_ambient_exposure_calculation() {
+        // Ambient chunk rad only
+        let chunk_rad = 5.0;
+        let empty_inv: Vec<(&str, u32)> = Vec::new();
+        assert_eq!(
+            dosimetry::calculate_ambient_exposure(chunk_rad, &empty_inv),
+            5.0
+        );
+
+        // Chunk rad + radioactive inventory items:
+        // 10 Uranium Ingots (1.5 Rad/s each) = 15.0 Rad/s
+        // 2 Uranium Ore (0.5 Rad/s each) = 1.0 Rad/s
+        // 64 Stone (0.0 Rad/s) = 0.0 Rad/s
+        let inventory = vec![
+            (content::ITEM_URANIUM_INGOT, 10),
+            (content::BLOCK_URANIUM_ORE, 2),
+            ("minecraft:stone", 64),
+        ];
+        let total_ambient = dosimetry::calculate_ambient_exposure(chunk_rad, &inventory);
+        // Expected = 5.0 + (10 * 1.5) + (2 * 0.5) = 5.0 + 15.0 + 1.0 = 21.0 Rad/s
+        assert!((total_ambient - 21.0).abs() < EPSILON);
+
+        // Alternative namespace tags: "ntm:ingot_uranium"
+        let alt_inventory = vec![("ntm:ingot_uranium", 4)];
+        assert_eq!(
+            dosimetry::calculate_ambient_exposure(0.0, &alt_inventory),
+            6.0
+        );
+    }
+
+    #[test]
+    fn test_player_hazmat_attenuation_99_percent() {
+        let ambient = 100.0_f32;
+
+        // 0 pieces -> 100% dose rate
+        let absorbed_0 = dosimetry::calculate_absorbed_exposure(ambient, 0);
+        assert!((absorbed_0 - 100.0).abs() < EPSILON);
+
+        // 2 pieces -> 90% attenuation (10% absorbed)
+        let absorbed_2 = dosimetry::calculate_absorbed_exposure(ambient, 2);
+        assert!((absorbed_2 - 10.0).abs() < EPSILON);
+
+        // Full 4 pieces -> 99% attenuation (1% absorbed)
+        let absorbed_4 = dosimetry::calculate_absorbed_exposure(ambient, 4);
+        assert!((absorbed_4 - 1.0).abs() < EPSILON);
+
+        // Clamped at 4 pieces max
+        let absorbed_extra = dosimetry::calculate_absorbed_exposure(ambient, 8);
+        assert!((absorbed_extra - 1.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_step_player_dosimetry_accumulation() {
+        let mut player = dosimetry::PlayerDosimetryData::new(0.0);
+        let chunk_rad = 10.0;
+        let inventory = [(content::ITEM_URANIUM_INGOT, 6)]; // 6 * 1.5 = 9.0 Rad/s
+        // Total ambient = 10.0 + 9.0 = 19.0 Rad/s
+
+        // Without hazmat: 1 tick (0.05s)
+        let rate_unshielded = dosimetry::step_player_dosimetry(
+            &mut player,
+            chunk_rad,
+            &inventory,
+            0,
+            0.05,
+        );
+        assert!((rate_unshielded - 19.0).abs() < EPSILON);
+        assert_eq!(player.last_ambient_rate, 19.0);
+        assert_eq!(player.last_absorbed_rate, 19.0);
+        assert!((player.dose - 19.0 * 0.05).abs() < EPSILON);
+
+        // With full hazmat suit (4 pieces): 99% attenuation -> absorbed rate = 0.19 Rad/s
+        let mut protected_player = dosimetry::PlayerDosimetryData::new(0.0);
+        let rate_shielded = dosimetry::step_player_dosimetry(
+            &mut protected_player,
+            chunk_rad,
+            &inventory,
+            4,
+            0.05,
+        );
+        assert!((rate_shielded - 0.19).abs() < EPSILON);
+        assert_eq!(protected_player.last_ambient_rate, 19.0);
+        assert!((protected_player.last_absorbed_rate - 0.19).abs() < EPSILON);
+        assert!((protected_player.dose - 0.19 * 0.05).abs() < EPSILON);
+
+        // Over 20 ticks (1 full second)
+        let mut sim_player = dosimetry::PlayerDosimetryData::new(0.0);
+        for _ in 0..20 {
+            dosimetry::step_player_dosimetry(&mut sim_player, 100.0, &[], 4, 0.05);
+        }
+        // Ambient 100 Rad/s attenuated to 1.0 Rad/s over 1 second = 1.0 Rad total dose
+        assert!((sim_player.dose - 1.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_coordinate_conversion() {
+        // Block to chunk
+        assert_eq!(dosimetry::block_to_chunk(0, 0), (0, 0));
+        assert_eq!(dosimetry::block_to_chunk(15, 15), (0, 0));
+        assert_eq!(dosimetry::block_to_chunk(16, 32), (1, 2));
+        assert_eq!(dosimetry::block_to_chunk(-1, -1), (-1, -1));
+        assert_eq!(dosimetry::block_to_chunk(-16, -17), (-1, -2));
+
+        // Float position to chunk
+        assert_eq!(dosimetry::pos_to_chunk(15.9, -0.1), (0, -1));
+        assert_eq!(dosimetry::pos_to_chunk(35.5, 48.2), (2, 3));
+    }
+
+    #[test]
+    fn test_runtime_state_integration() {
+        reset_state();
+        let dim = "minecraft:overworld";
+        let uuid = 42u128;
+
+        // Chunks
+        on_chunk_load(dim, [1, 2]);
+        set_chunk_radiation(dim, 1, 2, 50.0);
+        assert_eq!(get_chunk_radiation(dim, 1, 2), 50.0);
+
+        // Level tick
+        on_level_tick(dim);
+        let center = get_chunk_radiation(dim, 1, 2);
+        // 50.0 * 0.60 = 30.0 -> 30.0 * 0.99 - 0.05 = 29.65
+        assert!((center - 29.65).abs() < EPSILON);
+
+        // Player exposure record
+        let inv = [(content::ITEM_URANIUM_INGOT, 2)];
+        let rate = record_player_exposure(uuid, center, &inv, 4, 0.05);
+        // Ambient = 29.65 + 3.0 = 32.65 -> full hazmat 1% = 0.3265
+        assert!((rate - 0.3265).abs() < EPSILON);
+
+        let data = get_player_dosimetry(uuid);
+        assert!((data.dose - 0.3265 * 0.05).abs() < EPSILON);
+        assert!((data.last_ambient_rate - 32.65).abs() < EPSILON);
+        assert!((data.last_absorbed_rate - 0.3265).abs() < EPSILON);
+
+        set_player_dose(uuid, 500.0);
+        assert_eq!(get_player_dosimetry(uuid).dose, 500.0);
+
+        on_chunk_unload(dim, [1, 2]);
+        reset_state();
     }
 }

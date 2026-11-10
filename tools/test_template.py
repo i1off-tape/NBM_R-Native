@@ -41,13 +41,48 @@ def main():
         (original/'crates/horizon-client/Cargo.toml').write_text('[package]\nname="horizon-client"\nversion="0.1.0"\nedition="2024"\n')
         (original/'crates/horizon-client/src/lib.rs').write_text('pub mod game;\n')
         (original/'crates/horizon-client/src/game.rs').write_text('''
-pub struct Game<'a> { pub positions: &'a mut Vec<[i32;3]> }
+use std::sync::Arc;
+
+pub struct ItemStack {
+    pub item: Arc<str>,
+    pub count: u32,
+}
+
+pub struct NativeServerPlayer {
+    pub uuid: u128,
+    pub dimension: String,
+    pub position: [f64; 3],
+    pub game_mode: i32,
+}
+
+pub struct Game<'a> {
+    pub positions: &'a mut Vec<[i32;3]>,
+    pub inventory: Vec<Option<ItemStack>>,
+    pub armor: [Option<ItemStack>; 4],
+    pub offhand: Option<ItemStack>,
+}
 impl Game<'_> {
     pub fn break_block(&mut self,pos:[i32;3])->i32 {self.positions.push(pos); 7}
+    pub fn native_on(&self, _id: &str) -> bool { true }
+    pub fn native_acting_player(&self) -> Option<NativeServerPlayer> { None }
+}
+pub mod native_hooks {
+    use super::Game;
+    impl Game<'_> {
+        pub fn native_level_tick_post(&mut self, dimension: &str) { let _ = dimension; }
+        pub fn native_player_tick(&mut self) {}
+        pub fn native_chunk_load(&mut self, dimension: &str, chunk: [i32; 2]) { let _ = (dimension, chunk); }
+        pub fn native_chunk_unload(&mut self, dimension: &str, chunk: [i32; 2]) { let _ = (dimension, chunk); }
+    }
 }
 #[test] fn original_body_and_result_are_preserved() {
     let mut positions=Vec::new();
-    let mut game=Game {positions:&mut positions};
+    let mut game=Game {
+        positions:&mut positions,
+        inventory: Vec::new(),
+        armor: [None, None, None, None],
+        offhand: None,
+    };
     assert_eq!(game.break_block([1,2,3]),7);
     assert_eq!(game.break_block([-1,64,8]),7);
     assert_eq!(positions,vec![[1,2,3],[-1,64,8]]);
@@ -59,7 +94,8 @@ impl Game<'_> {
         before = snapshot(original)
         base = ['--workspace', str(original), '--mods', str(root/'mixins')]
         report = json.loads(run([str(cli), 'check', *base, '--out', str(stage), '--trust-native-mods']).stdout)
-        assert report['injections'] == 1 and report['modules'] == 1
+        expected_injections = len(manifest.get('injection', []))
+        assert report['injections'] == expected_injections and report['modules'] == 1
         assert 'passed' in report['cargo_stdout']
         first = snapshot(stage)
         second = json.loads(run([str(cli), 'check', *base, '--out', str(stage), '--trust-native-mods']).stdout)

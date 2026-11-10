@@ -18,3 +18,44 @@ kind = "HEAD"
 target = "horizon_client::game::Game<'_>::break_block"
 helper = "break.rs"
 bindings = [{ name = "pos", ty = "[i32;3]", value = "pos" }]
+
+[[injection]]
+id = "level-tick"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_level_tick_post"
+helper = "level_tick.rs"
+bindings = [
+    { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+    { name = "dimension", ty = "&str", value = "dimension" },
+]
+
+[[injection]]
+id = "player-tick"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_player_tick"
+helper = "player_tick.rs"
+bindings = [
+    { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+]
+
+[[injection]]
+id = "chunk-load"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_chunk_load"
+helper = "chunk_load.rs"
+bindings = [
+    { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+    { name = "dimension", ty = "&str", value = "dimension" },
+    { name = "chunk", ty = "[i32; 2]", value = "chunk" },
+]
+
+[[injection]]
+id = "chunk-unload"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_chunk_unload"
+helper = "chunk_unload.rs"
+bindings = [
+    { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+    { name = "dimension", ty = "&str", value = "dimension" },
+    { name = "chunk", ty = "[i32; 2]", value = "chunk" },
+]
