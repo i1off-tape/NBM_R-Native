@@ -41,7 +41,7 @@ def package():
                 if p.is_file():
                     content_files[p.relative_to(ROOT).as_posix()] = p.read_bytes()
 
-    # Build deterministic embedded content .hmod in mixins/<id>/data/
+    # Build deterministic embedded content .hmod in mixins/<id>/data/ and target/
     if content_files:
         embedded_hmod = bundle / 'data' / f"{mod['id']}-content.hmod"
         embedded_hmod.parent.mkdir(parents=True, exist_ok=True)
@@ -51,6 +51,8 @@ def package():
                 info.compress_type = zipfile.ZIP_DEFLATED
                 info.external_attr = 0o100644 << 16
                 archive.writestr(info, content)
+        target_hmod = ROOT / 'target' / f"{mod['id']}-{mod['version']}.hmod"
+        target_hmod.write_bytes(embedded_hmod.read_bytes())
 
     # Prepare bundle files
     manifest = dict(schema=1, id=mod['id'], version=mod['version'], game=GAME,
