@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Compile the real bundle on a tiny source fixture; no Horizon/assets required."""
+import argparse
 import json
 from pathlib import Path
 import subprocess
@@ -26,6 +27,9 @@ def audit(original, stage, plan):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--horizon', type=Path, default=horizon.ROOT.parent / 'horizon')
+    parser.parse_known_args()
     root = horizon.ROOT
     (root/'target').mkdir(exist_ok=True)
     run(['cargo', 'build', '--locked', '--offline', '-p', 'horizon-mixins-cli'], cwd=horizon.MIXINS)
@@ -106,6 +110,7 @@ impl Game<'_> {
     pub fn native_window(&self) -> bool { true }
     pub fn native_player(&self) -> Option<NativePlayer> { None }
     pub fn native_play_local_sound(&mut self, _sound: &str, _at: [f64; 3], _volume: f32, _pitch: f32, _delay: i32) -> bool { true }
+    pub fn player_menu_sound(&mut self, _sound: &str) {}
     pub fn native_corner_shown(&self, _corner: crate::extras::Corner) -> bool { true }
     pub fn native_fill(&self, _batch: &mut crate::hud::HudBatch, _rect: [f32; 4], _argb: u32) {}
     pub fn native_text(&self, _batch: &mut crate::hud::HudBatch, _text: &str, _at: [f32; 2], _color: u32, _shadow: bool) {}
@@ -114,10 +119,6 @@ impl Game<'_> {
 pub mod native_hooks {
     use super::Game;
     impl Game<'_> {
-        pub fn native_level_tick_post(&mut self, dimension: &str) { let _ = dimension; }
-        pub fn native_player_tick(&mut self) {}
-        pub fn native_chunk_load(&mut self, dimension: &str, chunk: [i32; 2]) { let _ = (dimension, chunk); }
-        pub fn native_chunk_unload(&mut self, dimension: &str, chunk: [i32; 2]) { let _ = (dimension, chunk); }
         pub fn native_tick(&mut self) {}
         pub fn native_hud(&mut self, batch: &mut crate::hud::HudBatch, corners: &mut crate::extras_hud::Corners) {
             let _ = (batch, corners);

@@ -1030,8 +1030,8 @@ pub fn on_chunk_unload(dimension: &str, chunk: [i32; 2]) {
     lock_tracker(|t| t.on_chunk_unload(dimension, chunk[0], chunk[1]));
 }
 
-pub fn on_level_tick(dimension: &str) {
-    lock_tracker(|t| t.tick_level(dimension, false));
+pub fn on_level_tick(dimension: &str, is_raining: bool) {
+    lock_tracker(|t| t.tick_level(dimension, is_raining));
 }
 
 pub fn get_chunk_radiation(dimension: &str, cx: i32, cz: i32) -> f32 {
@@ -1598,7 +1598,7 @@ mod tests {
         assert_eq!(get_chunk_radiation(dim, 1, 2), 50.0);
 
         // Level tick
-        on_level_tick(dim);
+        on_level_tick(dim, false);
         let center = get_chunk_radiation(dim, 1, 2);
         // 50.0 * 0.60 = 30.0 -> 30.0 * 0.99 - 0.05 = 29.65
         assert!((center - 29.65).abs() < EPSILON);

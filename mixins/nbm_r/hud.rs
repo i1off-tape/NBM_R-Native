@@ -32,11 +32,7 @@ fn nbm_r_hud(
         return;
     }
 
-    let dose = if let Some(acting) = game.native_acting_player() {
-        crate::game::nbm_r::get_player_dosimetry(acting.uuid).dose
-    } else {
-        0.0
-    };
+    let dose = crate::game::nbm_r::get_player_dosimetry(0).dose;
 
     let (cx, cz) = crate::game::nbm_r::dosimetry::pos_to_chunk(p.x, p.z);
     let chunk_rad = crate::game::nbm_r::get_chunk_radiation(&p.dimension, cx, cz);
