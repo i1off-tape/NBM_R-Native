@@ -1,0 +1,12 @@
+{
+  "geiger.click": {
+    "subtitle": "subtitles.ntm.geiger_click",
+    "sounds": [
+      {
+        "name": "nbm_r:geiger_click",
+        "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  }
+}

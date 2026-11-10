@@ -17,7 +17,14 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 COMPAT = json.loads((ROOT / "compatibility.json").read_text())
 PIN = COMPAT["horizon_revision"]
-MIXINS = Path(os.environ.get("HORIZON_MIXINS", ROOT.parent / "horizon-mixins")).resolve()
+MIXINS = Path(
+    os.environ.get(
+        "HORIZON_MIXINS",
+        ROOT.parent / "horizon-mixins"
+        if (ROOT.parent / "horizon-mixins").exists()
+        else ROOT.parent.parent / "horizon-mixins",
+    )
+).resolve()
 
 
 def digest(data):

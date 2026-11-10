@@ -1,0 +1,14 @@
+{
+  "layers": {
+    "humanoid": [
+      {
+        "texture": "ntm:hazmat"
+      }
+    ],
+    "humanoid_leggings": [
+      {
+        "texture": "ntm:hazmat"
+      }
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+id = "nbm_r"
+name = "NBM_R-Native"
+version = "0.1.0"
+description = "HBM's Nuclear Tech Mod native port for Horizon"
+authors = ["i1off"]
+api = "0.2"
+side = "both"
+capabilities = ["registries"]
+namespaces = ["ntm"]

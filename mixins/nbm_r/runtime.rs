@@ -184,6 +184,62 @@ pub mod radiation {
     }
 }
 
+/// Declarative radiological items, blocks, and tags.
+pub mod content {
+    pub const ID: &str = "nbm_r";
+
+    pub const BLOCK_URANIUM_ORE: &str = "nbm_r:uranium_ore";
+    pub const ITEM_URANIUM_INGOT: &str = "nbm_r:uranium_ingot";
+    pub const ITEM_GEIGER_COUNTER: &str = "nbm_r:geiger_counter";
+    pub const ITEM_HAZMAT_HELMET: &str = "nbm_r:hazmat_helmet";
+    pub const ITEM_HAZMAT_CHESTPLATE: &str = "nbm_r:hazmat_chestplate";
+    pub const ITEM_HAZMAT_LEGGINGS: &str = "nbm_r:hazmat_leggings";
+    pub const ITEM_HAZMAT_BOOTS: &str = "nbm_r:hazmat_boots";
+
+    pub const TAG_HAZMAT: &str = "#ntm:hazmat";
+    pub const TAG_RADIOACTIVE: &str = "#ntm:radioactive";
+
+    /// Default ionizing radiation emission rate for raw Uranium Ingot in Rad/s.
+    pub const URANIUM_INGOT_RAD_PER_SEC: f32 = 1.5;
+    /// Default ionizing radiation emission rate for Uranium Ore block in Rad/s.
+    pub const URANIUM_ORE_RAD_PER_SEC: f32 = 0.5;
+
+    /// Uranium ingot stack size limit.
+    pub const URANIUM_INGOT_MAX_STACK: u8 = 64;
+    /// Geiger counter stack size limit.
+    pub const GEIGER_COUNTER_MAX_STACK: u8 = 1;
+    /// Hazmat suit pieces stack size limit.
+    pub const HAZMAT_PIECE_MAX_STACK: u8 = 1;
+
+    /// Full hazmat suit pieces list.
+    pub const HAZMAT_PIECES: [&str; 4] = [
+        ITEM_HAZMAT_HELMET,
+        ITEM_HAZMAT_CHESTPLATE,
+        ITEM_HAZMAT_LEGGINGS,
+        ITEM_HAZMAT_BOOTS,
+    ];
+
+    /// Check if item id is a registered Hazmat armor piece.
+    pub fn is_hazmat_piece(item_id: &str) -> bool {
+        HAZMAT_PIECES.contains(&item_id)
+            || item_id == "ntm:hazmat_helmet"
+            || item_id == "ntm:hazmat_chestplate"
+            || item_id == "ntm:hazmat_leggings"
+            || item_id == "ntm:hazmat_boots"
+    }
+
+    /// Return radiation emission rate for radioactive items in Rad/s.
+    pub fn item_radiation_emission(item_id: &str) -> f32 {
+        if item_id == ITEM_URANIUM_INGOT || item_id == "ntm:ingot_uranium" || item_id == "ntm:uranium_ingot" {
+            URANIUM_INGOT_RAD_PER_SEC
+        } else if item_id == BLOCK_URANIUM_ORE || item_id == "ntm:ore_uranium" || item_id == "ntm:uranium_ore" {
+            URANIUM_ORE_RAD_PER_SEC
+        } else {
+            0.0
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,5 +477,24 @@ mod tests {
         // Diagonal: 100.0 * 0.025 = 2.5 -> decayed: 2.5 * 0.99 - 0.05 = 2.425
         let diagonal = next_step.get(&(1, 1)).copied().unwrap_or(0.0);
         assert!((diagonal - 2.425).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_declarative_content_properties() {
+        assert_eq!(content::HAZMAT_PIECES.len(), 4);
+        for piece in &content::HAZMAT_PIECES {
+            assert!(content::is_hazmat_piece(piece));
+        }
+        assert!(content::is_hazmat_piece("ntm:hazmat_helmet"));
+        assert!(!content::is_hazmat_piece("minecraft:iron_helmet"));
+
+        assert_eq!(content::item_radiation_emission(content::ITEM_URANIUM_INGOT), 1.5);
+        assert_eq!(content::item_radiation_emission("ntm:ingot_uranium"), 1.5);
+        assert_eq!(content::item_radiation_emission(content::BLOCK_URANIUM_ORE), 0.5);
+        assert_eq!(content::item_radiation_emission("minecraft:stone"), 0.0);
+
+        assert_eq!(content::URANIUM_INGOT_MAX_STACK, 64);
+        assert_eq!(content::GEIGER_COUNTER_MAX_STACK, 1);
+        assert_eq!(content::HAZMAT_PIECE_MAX_STACK, 1);
     }
 }

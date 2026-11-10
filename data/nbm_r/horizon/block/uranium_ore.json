@@ -1,0 +1,9 @@
+{
+  "template": "minecraft:iron_ore",
+  "properties": {
+    "hardness": 5.0,
+    "explosion_resistance": 10.0,
+    "requires_tool": true,
+    "sounds": "minecraft:stone"
+  }
+}

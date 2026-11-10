@@ -1,0 +1,11 @@
+{
+  "block.nbm_r.uranium_ore": "Uranium Ore",
+  "item.nbm_r.uranium_ingot": "Uranium Ingot",
+  "item.nbm_r.geiger_counter": "Geiger Counter",
+  "item.nbm_r.hazmat_helmet": "Hazmat Helmet",
+  "item.nbm_r.hazmat_chestplate": "Hazmat Suit",
+  "item.nbm_r.hazmat_leggings": "Hazmat Leggings",
+  "item.nbm_r.hazmat_boots": "Hazmat Boots",
+  "itemGroup.nbm_r": "Nuclear Tech Mod (NTM)",
+  "subtitles.ntm.geiger_click": "Geiger counter clicks"
+}

@@ -1,0 +1,13 @@
+{
+  "title": "Nuclear Tech Mod (NTM)",
+  "icon": "nbm_r:uranium_ingot",
+  "items": [
+    "nbm_r:uranium_ore",
+    "nbm_r:uranium_ingot",
+    "nbm_r:geiger_counter",
+    "nbm_r:hazmat_helmet",
+    "nbm_r:hazmat_chestplate",
+    "nbm_r:hazmat_leggings",
+    "nbm_r:hazmat_boots"
+  ]
+}
