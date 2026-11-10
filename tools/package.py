@@ -10,12 +10,17 @@ import json
 from pathlib import Path
 import tomllib
 import zipfile
+import validate_content
 
 ROOT = Path(__file__).resolve().parents[1]
 GAME = '26.3'
 
 
 def package():
+    val = validate_content.validate_content()
+    if val["status"] != "ok":
+        raise SystemExit(f"Content validation failed: {json.dumps(val['errors'], indent=2)}")
+
     compat = json.loads((ROOT / 'compatibility.json').read_text())
     manifests = sorted((ROOT / 'mixins').glob('*/horizon-mixin.toml'))
     if len(manifests) != 1:

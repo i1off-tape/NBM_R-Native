@@ -47,6 +47,10 @@ export PATH="/home/i1off/.local/share/horizon-launcher/rust/1.99.1-x86_64-unknow
      ```rust
      if !game.native_on(crate::game::nbm_r::ID) { return; }
      ```
+6. **Workspace Test Isolation (Never run full `cargo test` on Horizon engine)**:
+   - Do NOT run `cargo test` across `/home/i1off/horizon_repos/horizon/`. It compiles >100 workspace crates, takes minutes, and exhausts machine memory.
+   - For verifying mixins and game compilation, use only `python3 tools/horizon.py check` and `python3 tools/test_template.py`.
+   - Run unit tests exclusively in the mod directory via local `cargo test`.
 
 ---
 
@@ -63,12 +67,15 @@ Search the package structure in `/home/i1off/horizon_repos/hbm-s-nuclear-tech-gi
 - `explosion/` -> Blast algorithms.
 
 ### Step 2: Decide Architecture: Data vs. Native Code
-- **Declarative Content** (blocks, items, fluid definitions, recipes, creative tabs):
-  - Put into `data/ntm/horizon/...` or `assets/ntm/...`.
-  - Content mods (`.hmod`) handle static properties without Rust code.
-- **Dynamic Behavior** (ticking machines, radiation math, custom HUD, custom rendering):
-  - Place pure simulation logic in `mixins/nbm_r/runtime.rs` (or submodules inside `mixins/nbm_r/`).
-  - Wire to Horizon engine via `horizon-mixin.toml` hooks.
+Horizon enforces a dual-package model:
+1. **Content Mod (`.hmod`)**:
+   - Holds declarative content: blocks, items, textures, sounds, language files, creative tabs (`data/`, `assets/`, `horizon-mod.toml`).
+   - Installed in `~/.local/share/horizon/horizon-mods/<id>.hmod`.
+   - Must contain only standard vanilla component types. Never use custom/NBT fields (e.g. `minecraft:custom_data`) in item definitions, as Horizon will abort loading the entire mod.
+2. **Native Mod (`.hnmod`)**:
+   - Holds AST mixin injections and pure Rust simulation logic (`mixins/<id>/`).
+   - Installed in `~/.local/share/horizon/horizon-native-mods/<id>.hnmod`.
+   - The launcher compiles this into the game client automatically upon startup.
 
 ### Step 3: Implement Pure Simulation & Tests
 Write unit tests directly in `mixins/nbm_r/runtime.rs` or a submodule under `#[cfg(test)]`:
@@ -88,14 +95,18 @@ cargo test
 ### Step 4: Wire Hook Injections
 Add the necessary `[[injection]]` in `mixins/nbm_r/horizon-mixin.toml` and write the thin helper file (e.g., `mixins/nbm_r/tick.rs`).
 
-### Step 5: Validate
-Always run the validation suite:
+### Step 5: Validate and Package
+Always run the validation suite before packaging or distribution:
 ```bash
 export PATH="/home/i1off/.local/share/horizon-launcher/rust/1.99.1-x86_64-unknown-linux-gnu/bin:$PATH"
 cargo test
+python3 tools/validate_content.py
 python3 tools/test_template.py
 python3 tools/package.py
 ```
+`python3 tools/package.py` validates content definitions and builds both artifacts in `target/`:
+- `target/<id>-<version>.hnmod` (the native mixin bundle)
+- `target/<id>-<version>.hmod` (the declarative content bundle)
 
 ---
 

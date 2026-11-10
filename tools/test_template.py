@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import tomllib
 import horizon
+import validate_content
 
 
 def run(command, **kwargs):
@@ -171,9 +172,12 @@ pub mod native_hooks {
         bad = subprocess.run([str(cli), 'apply', *base, '--out', str(stage)], capture_output=True, text=True)
         assert bad.returncode and json.loads(bad.stderr)['code'] == 'E_TARGET_NOT_FOUND'
         assert snapshot(stage) == first
+    val = validate_content.validate_content()
+    assert val['status'] == 'ok', f"Content validation failed: {val['errors']}"
     print(json.dumps({'status': 'ok', 'compiled_runtime_and_original_body': True,
                       'only_planned_asts_changed': True, 'deterministic_bytes_and_mtimes': True,
-                      'incompatible_revision_and_target_rejected': True}, indent=2))
+                      'incompatible_revision_and_target_rejected': True,
+                      'content_declarations_valid': True}, indent=2))
 
 
 if __name__ == '__main__':
