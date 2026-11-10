@@ -1,0 +1,15 @@
+[package]
+name = "horizon-mod-nbm-r"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "HBM's Nuclear Tech Mod Native Rust Port for Horizon"
+
+[lib]
+# This exact source is also injected as a same-crate module by horizon-mixins.
+path = "mixins/nbm_r/runtime.rs"
+
+[workspace]
+members = ["tools/audit"]
+resolver = "2"
