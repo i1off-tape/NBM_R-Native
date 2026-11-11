@@ -3,8 +3,148 @@
     "subtitle": "subtitles.ntm.geiger_click",
     "sounds": [
       {
-        "name": "ntm:geiger_click",
+        "name": "nbm_r:geiger1",
         "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  },
+  "geiger1": {
+    "subtitle": "subtitles.ntm.geiger_click",
+    "sounds": [
+      {
+        "name": "nbm_r:geiger1",
+        "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  },
+  "geiger2": {
+    "subtitle": "subtitles.ntm.geiger_click",
+    "sounds": [
+      {
+        "name": "nbm_r:geiger2",
+        "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  },
+  "geiger3": {
+    "subtitle": "subtitles.ntm.geiger_click",
+    "sounds": [
+      {
+        "name": "nbm_r:geiger3",
+        "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  },
+  "geiger4": {
+    "subtitle": "subtitles.ntm.geiger_click",
+    "sounds": [
+      {
+        "name": "nbm_r:geiger4",
+        "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  },
+  "geiger5": {
+    "subtitle": "subtitles.ntm.geiger_click",
+    "sounds": [
+      {
+        "name": "nbm_r:geiger5",
+        "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  },
+  "geiger6": {
+    "subtitle": "subtitles.ntm.geiger_click",
+    "sounds": [
+      {
+        "name": "nbm_r:geiger6",
+        "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  },
+  "item.geiger1": {
+    "subtitle": "subtitles.ntm.geiger_click",
+    "sounds": [
+      {
+        "name": "nbm_r:geiger1",
+        "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  },
+  "item.geiger2": {
+    "subtitle": "subtitles.ntm.geiger_click",
+    "sounds": [
+      {
+        "name": "nbm_r:geiger2",
+        "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  },
+  "item.geiger3": {
+    "subtitle": "subtitles.ntm.geiger_click",
+    "sounds": [
+      {
+        "name": "nbm_r:geiger3",
+        "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  },
+  "item.geiger4": {
+    "subtitle": "subtitles.ntm.geiger_click",
+    "sounds": [
+      {
+        "name": "nbm_r:geiger4",
+        "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  },
+  "item.geiger5": {
+    "subtitle": "subtitles.ntm.geiger_click",
+    "sounds": [
+      {
+        "name": "nbm_r:geiger5",
+        "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  },
+  "item.geiger6": {
+    "subtitle": "subtitles.ntm.geiger_click",
+    "sounds": [
+      {
+        "name": "nbm_r:geiger6",
+        "attenuation_distance": 8,
+        "stream": false
+      }
+    ]
+  },
+  "item.techBoop": {
+    "subtitle": "subtitles.item.tech_boop",
+    "sounds": [
+      {
+        "name": "nbm_r:tech_boop",
+        "attenuation_distance": 16,
+        "stream": false
+      }
+    ]
+  },
+  "item.tech_boop": {
+    "subtitle": "subtitles.item.tech_boop",
+    "sounds": [
+      {
+        "name": "nbm_r:tech_boop",
+        "attenuation_distance": 16,
         "stream": false
       }
     ]

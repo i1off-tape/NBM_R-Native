@@ -20,17 +20,17 @@ To prevent architectural drift and ensure that playable, verified physics loops 
 ### Subsystem 1: Radiation, Toxicity and Environmental Hazards
 - **Java Source Packages**: `com.hbm.hazard.*`, `com.hbm.saveddata.RadiationSavedData`, `com.hbm.extprop.HbmLivingProps`, `com.hbm.handler.radiation.*`, `com.hbm.potion.*`
 - **Tier**: Tier 1
-- **Status**: In Progress (Scaffolded, testable attenuation formula)
-- **Target Location**: `mixins/nbm_r/runtime/hazard.rs`, `mixins/nbm_r/hud.rs`, `data/ntm/horizon/mob_effect/`
+- **Status**: Core Parity Achieved (Spec 7: Core Physics, Dosimetry, Hazmat, Sickness, Geiger)
+- **Target Location**: `mixins/nbm_r/runtime.rs`, `mixins/nbm_r/hud.rs`, `mixins/nbm_r/tick.rs`, `data/nbm_r/horizon/`
 - **Key Mechanics**:
-  - `[ ]` Chunk radiation tracking via `Holder::Chunk` Attachments (`ChunkRadiation { rads: f32, fallout: f32 }`).
-  - `[ ]` Environmental decay ($0.999 \times \text{rads}/\text{tick}$) and 4-way horizontal gradient diffusion in `level_tick_post`.
-  - `[ ]` Rain fallout washout transferring atmospheric fallout into surface block contamination.
-  - `[ ]` Entity dose accumulation: distance attenuation from chunk emitters plus inventory radioactive items.
-  - `[ ]` Protective gear attenuation: Lead and Hazmat armor tag attenuation factor ($99\%$ reduction for full suits).
-  - `[ ]` Biological symptom thresholds: Nausea/Slowness ($>200$ Rad), Weakness/Fatigue ($>500$ Rad), Lethal Damage ($>1000$ Rad).
-  - `[ ]` Interactive Geiger counter audio clicks ($\log_{10}(\text{rads})$ frequency) and corner HUD dial in `native_hud`.
-  - `[ ]` Secondary hazards: Asbestos inhalation, coal dust explosion hazard, cryogenic freezing, and flash blindness.
+  - `[x]` Chunk radiation tracking: Runtime `WorldRadiationTracker` with persistence & level ticks.
+  - `[x]` Environmental decay and 8-way mass-conserving gradient diffusion in `radiation.rs`.
+  - `[ ]` Rain fallout washout transferring atmospheric fallout into surface block contamination (Deferred: surface block infection).
+  - `[x]` Entity dose accumulation: chunk exposure plus inventory radioactive items emission.
+  - `[x]` Protective gear attenuation: Hazmat armor 99% attenuation for full suit (Lead armor deferred).
+  - `[x]` Biological symptom thresholds: 5 sickness stages & lethal death at 1000 Rad with single death command and effect cleanup.
+  - `[x]` Interactive Geiger counter audio clicks ($\log_{10}(\text{rads})$ frequency) and corner HUD dial in `native_hud`.
+  - `[ ]` Secondary hazards: Asbestos inhalation, coal dust explosion hazard, cryogenic freezing, and flash blindness (Deferred to Tier 3).
 
 ### Subsystem 2: Energy Networks (HE - Hbm Energy)
 - **Java Source Packages**: `api.hbm.energymk2.*`, `com.hbm.tileentity.conductor.*`, `com.hbm.blocks.network.*`

@@ -15,6 +15,24 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def ensure_cargo_in_path():
+    if shutil.which("cargo"):
+        return
+    launcher_rust = Path.home() / ".local/share/horizon-launcher/rust"
+    if launcher_rust.is_dir():
+        for bin_dir in sorted(launcher_rust.glob("*/bin"), reverse=True):
+            if (bin_dir / "cargo").is_file() and os.access(bin_dir / "cargo", os.X_OK):
+                os.environ["PATH"] = f"{bin_dir}:{os.environ.get('PATH', '')}"
+                return
+    cargo_home_bin = Path.home() / ".cargo/bin"
+    if (cargo_home_bin / "cargo").is_file() and os.access(cargo_home_bin / "cargo", os.X_OK):
+        os.environ["PATH"] = f"{cargo_home_bin}:{os.environ.get('PATH', '')}"
+
+
+ensure_cargo_in_path()
+
 COMPAT = json.loads((ROOT / "compatibility.json").read_text())
 PIN = COMPAT["horizon_revision"]
 MIXINS = Path(

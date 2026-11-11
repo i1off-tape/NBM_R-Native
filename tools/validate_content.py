@@ -76,6 +76,14 @@ DISALLOWED_COMPONENTS = {
     "minecraft:custom_data": "custom_data is not in vanilla item definition tables and will abort Horizon mod loading",
 }
 
+# Canonical item invariants (durability, armor) matching Java HBM MainRegistry.java
+CANONICAL_ITEM_INVARIANTS = {
+    "hazmat_helmet.json": {"max_damage": 660, "armor": 2.0},
+    "hazmat_chestplate.json": {"max_damage": 960, "armor": 5.0},
+    "hazmat_leggings.json": {"max_damage": 900, "armor": 4.0},
+    "hazmat_boots.json": {"max_damage": 780, "armor": 1.0},
+}
+
 
 def validate_content():
     errors = []
@@ -95,7 +103,23 @@ def validate_content():
     else:
         warnings.append("horizon-mod.toml is missing at repository root")
 
-    # 2. Check all JSON files in data/ and assets/
+    # 2. Check all files in data/ and assets/ for Horizon resource path compliance
+    for folder in ["data", "assets"]:
+        base = ROOT / folder
+        if not base.is_dir():
+            continue
+        for p in sorted(base.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(ROOT)
+            for part in rel.parts:
+                if not all(c.islower() or c.isdigit() or c in "._-" for c in part):
+                    errors.append(
+                        f"{rel}: path contains invalid characters (must match [a-z0-9_.-] as required by Horizon check_path)"
+                    )
+                    break
+
+    # 3. Check all JSON files in data/ and assets/
     for folder in ["data", "assets"]:
         base = ROOT / folder
         if not base.is_dir():
@@ -133,6 +157,26 @@ def validate_content():
                                 errors.append(
                                     f"{rel}: unknown or unsupported component '{comp_name}'"
                                 )
+
+                        # Canonical invariants check against Java HBM reference
+                        if p.name in CANONICAL_ITEM_INVARIANTS:
+                            inv = CANONICAL_ITEM_INVARIANTS[p.name]
+                            if "max_damage" in inv:
+                                actual_max_damage = comps.get("minecraft:max_damage")
+                                if actual_max_damage != inv["max_damage"]:
+                                    errors.append(
+                                        f"{rel}: canonical max_damage mismatch (got {actual_max_damage}, expected {inv['max_damage']})"
+                                    )
+                            if "armor" in inv:
+                                actual_armor = None
+                                for mod in comps.get("minecraft:attribute_modifiers", []):
+                                    if isinstance(mod, dict) and mod.get("type") == "minecraft:armor":
+                                        actual_armor = mod.get("amount")
+                                        break
+                                if actual_armor != inv["armor"]:
+                                    errors.append(
+                                        f"{rel}: canonical armor attribute mismatch (got {actual_armor}, expected {inv['armor']})"
+                                    )
 
             # Special checks for block definitions: data/<id>/horizon/block/*.json
             if len(parts) >= 5 and parts[0] == "data" and parts[2] == "horizon" and parts[3] == "block":

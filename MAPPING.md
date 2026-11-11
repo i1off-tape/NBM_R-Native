@@ -30,9 +30,44 @@ This document maps Java packages, classes, and mechanics from **Hbm's Nuclear Te
 | Original Java Class | Target Rust Implementation | Notes |
 |---|---|---|
 | `com.hbm.hazard.HazardSystem` | `nbm_r::hazard::HazardSystem` | Pure functions calculating biological effect from Rads/sec. |
-| `com.hbm.saveddata.RadiationSavedData` | `nbm_r::hazard::ChunkRadiationAttachment` | Server Attachment on `Holder::Chunk([x, z])`. |
-| `com.hbm.items.tool.ItemGeigerCounter` | `nbm_r::hazard::geiger_hud` | Hook `native_hud` + audio playback. |
+| `com.hbm.hazard.HazardRegistry` | `nbm_r::content` | Radiation emission values: `HazardRegistry.u` = 0.35 Rad/s. |
+| `com.hbm.handler.radiation.ChunkRadiationManager` | `nbm_r::dosimetry::WorldRadiationTracker` | 20-tick cadence update (`eggTimer >= 20`). |
+| `com.hbm.handler.radiation.ChunkRadiationHandlerNT` | `nbm_r::radiation` | Chunk radiation decay: `p.radiation *= 0.999F; p.radiation -= 0.05F`. |
+| `com.hbm.handler.EntityEffectHandler` | `nbm_r::sickness` & `mixins/nbm_r/tick.rs` | 5 sickness tiers (200, 400, 600, 800, 1000 Rad), Poison, Wither, instant death. |
+| `com.hbm.extprop.HbmLivingProps` | `nbm_r::dosimetry::PlayerDosimetryData` | Dose clamping (2500 max), zero passive decay, reset on death. |
+| `com.hbm.items.tool.ItemGeigerCounter` | `nbm_r::geiger_hud` & `mixins/nbm_r/tick.rs` | 5-tick candidate pool, geiger1-geiger6 selection, needle dial, spatial audio. |
+| `com.hbm.main.MainRegistry` | `data/nbm_r/horizon/item/hazmat_*.json` | Armor stats: `aMatHaz` (factor 60: 660, 960, 900, 780; armor 2, 5, 4, 1). |
 | `com.hbm.potion.HbmPotion` | `data/ntm/horizon/mob_effect/*.json` | Content effect definitions + custom damage hooks. |
+
+#### Detailed Hazard & Radiation Mechanics Parity
+
+1. **Geiger Counter Audio Playback (`ItemGeigerCounter.java` -> `tick.rs`):**
+   - **Original Java behavior:** Plays `hbm:item.geiger` with pitch jitter (`0.8F + itemRand.nextFloat() * 0.4F`) and sound tier selection based on radiation range.
+   - **Horizon Native implementation:** Uses `game.native_play_local_sound("nbm_r:geiger<1..6>", [p.x, p.y, p.z], effective_vol, 1.0, 0)` with pitch fixed at 1.0 and volume scaled by `effective_audio_volume(1.0, master_volume, player_volume)`.
+   - **Engine API rationale:** `game.player_menu_sound` is intentionally avoided because Horizon's `menu_clicks.rs` forcibly randomizes pitch (`0.8 + 0.4 * rand`) and overrides volume to `0.8`, corrupting Geiger click audio. `native_play_local_sound` gives crisp, unattenuated pitch and spatial realism.
+
+2. **Radiation Sickness Status Effects (`EntityEffectHandler.java` -> `tick.rs`):**
+   - **Original Java behavior:** Rolls RNG checks (`rand.nextInt(300) == 0`, `rand.nextInt(500) == 0`, `rand.nextInt(700) == 0`) each tick to apply vanilla potion effects (`confusion`, `moveSlowdown`, `weakness`, `poison`, `wither`).
+   - **Horizon Native implementation:** Periodically refreshes active status effects every 40 ticks (2 seconds, starting on tick 1) via command dispatch:
+     ```
+     effect give @p <effect_id> <duration_sec> <amplifier> true
+     ```
+     The trailing `true` hides ambient potion particles, matching Java HBM's invisible debuff styling.
+   - **Effect Tiers:**
+     - Stage 1 (200 - 399 RAD): Nausea I (amplifier 0, 5s), Weakness I (amplifier 0, 5s).
+     - Stage 2 (400 - 599 RAD): Nausea I (amplifier 0, 7s), Slowness I (amplifier 0, 5s), Weakness II (amplifier 1, 5s).
+     - Stage 3 (600 - 799 RAD): Nausea I (amplifier 0, 7s), Slowness III (amplifier 2, 10s), Weakness III (amplifier 2, 10s), Poison II (amplifier 1, 3s).
+     - Stage 4 (800 - 999 RAD): Nausea I (amplifier 0, 7s), Slowness III (amplifier 2, 10s), Weakness III (amplifier 2, 10s), Poison III (amplifier 2, 3s), Wither II (amplifier 1, 3s).
+
+3. **Lethal Radiation Damage & Dose Reset (`EntityEffectHandler.java:237` -> `tick.rs`):**
+   - **Original Java behavior:**
+     ```java
+     if (props.getRadiation() >= 1000.0F) {
+         entity.attackEntityFrom(ModDamageSource.radiation, 1000F);
+         props.setRadiation(0.0F);
+     }
+     ```
+   - **Horizon Native implementation:** Evaluates lethal threshold (`dose >= 1000.0`). Resets accumulated dose via `set_player_dose(0, 0.0)` and executes lethal damage via `game.native_run_command("kill @p")`. Dose is cleared so respawned players start clean.
 
 ### Energy & Fluid Transport
 | Original Java Class | Target Rust Implementation | Notes |
@@ -72,7 +107,8 @@ This document maps Java packages, classes, and mechanics from **Hbm's Nuclear Te
 
 | Horizon Hook | File Location | Intended NBM_R Usage |
 |---|---|---|
-| `native_hooks::Game::native_hud` | `mixins/nbm_r/hud.rs` | Geiger counter, radiation gauge, compass, missile radar. |
+| `native_hooks::Game::native_tick` | `mixins/nbm_r/tick.rs` | 4-step tick pipeline: (1) chunk diffusion/decay, (2) player exposure/dosimetry, (3) sickness evaluation & command dispatch, (4) Geiger audio candidate pool & spatial sound playback. |
+| `native_hooks::Game::native_hud` | `mixins/nbm_r/hud.rs` | Geiger counter needle gauge, radiation meter, compass, missile radar. |
 | `native_hooks::Game::native_key` | `mixins/nbm_r/key.rs` | Keybindings (suit night vision, Geiger sound mute). |
 | `native_hooks::Game::native_settings` | `mixins/nbm_r/settings.rs` | In-game configuration menu (Options > Mods > NTM). |
 | `native_hooks::Level::level_tick_post` | `mixins/nbm_r/level_tick.rs` | Radiation diffusion, cable grids, queued nuclear blasts. |

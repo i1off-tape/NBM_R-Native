@@ -18,6 +18,16 @@ This document provides an exhaustive, step-by-step engineering specification for
 | **Networking** | Custom Forge SimpleNetworkWrapper (`IPacket`) | Dedicated `horizon:mod_net` channels + raw packets |
 | **Rendering** | OpenGL 1.2 / 2.1 fixed pipeline, Tessellator | Modern `wgpu` (Vulkan/Metal), WGSL shaders, `HudBatch` |
 
+### Client vs Integrated Server Model in Horizon Hooks
+
+In Horizon, even during singleplayer, the game runs a dual client/server architecture:
+- **Server thread (`Serving` / `LanHost`)**:
+  - The authoritative simulation state. Players are stored in `lan.hub.guests`.
+  - Dosimetry calculations, radiation exposure, sickness progression, lethal damage, and status commands (`effect`, `kill`) must run **authoritatively on the server** via `game.native_server_players()`, `game.native_player_stacks()`, `game.native_player_equipment()`, and `game.native_run_command()`.
+  - Modifying client-side player health directly (`p.set_health(0.0)`) or sending client commands does not take effect on the server and will be overwritten on the next tick packet.
+- **Client thread (`native_window()` / `native_player()`)**:
+  - Responsible solely for local rendering and audio: drawing the Geiger counter HUD dial in `native_hud` and playing spatial click sounds via `game.native_play_local_sound()`.
+
 ---
 
 ## 2. Subsystem Technical Blueprint

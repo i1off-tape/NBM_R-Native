@@ -2,6 +2,9 @@
 
 Welcome, agent. This document (`AGENTS.md`) is your primary operational manual for developing and maintaining **NBM_R-Native** — the high-performance native Rust port of **HBM's Nuclear Tech Mod (NTM)** for the **Horizon** voxel engine.
 
+
+READ: README.MD , VALIDATION.MD , GLOSSARY.MD, CODING_STANDARTS.MD
+
 ---
 
 ## 1. Environment & Path Map
@@ -18,7 +21,7 @@ All paths are relative to `/home/i1off/horizon_repos/`:
 | **Rust / Cargo Binary** | `/home/i1off/.local/share/horizon-launcher/rust/1.99.1-x86_64-unknown-linux-gnu/bin` | Use this in `PATH` if `cargo` is not in standard system PATH. |
 
 ### Essential Environment Setup
-Before running shell commands, always ensure Cargo is in your `PATH`:
+All Python tools in `tools/` (`check.py`, `horizon.py`, `test_template.py`) automatically detect and prepend the Horizon Cargo toolchain to `PATH`. If running standalone shell commands (like raw `cargo test`), ensure Cargo is in your `PATH`:
 ```bash
 export PATH="/home/i1off/.local/share/horizon-launcher/rust/1.99.1-x86_64-unknown-linux-gnu/bin:$PATH"
 ```
@@ -54,12 +57,27 @@ export PATH="/home/i1off/.local/share/horizon-launcher/rust/1.99.1-x86_64-unknow
 
 ---
 
+### Mandatory Knowledge Graph Usage (`codebase-memory-mcp`)
+All three major repositories in `/home/i1off/horizon_repos/` are indexed in `codebase-memory-mcp`:
+1. **This Mod:** `home-i1off-horizon_repos-NBM_R-Native` (or `/home/i1off/horizon_repos/NBM_R-Native`)
+2. **Horizon Engine:** `home-i1off-horizon_repos-horizon` (or `/home/i1off/horizon_repos/horizon`)
+3. **Java HBM Mod:** `home-i1off-horizon_repos-hbm-s-nuclear-tech-git` (or `/home/i1off/horizon_repos/hbm-s-nuclear-tech-git`)
+
+**CRITICAL REQUIREMENT:**
+- **ALWAYS** query `codebase-memory-mcp` (`search_graph`, `get_code_snippet`, `trace_path`, `query_graph`) first before attempting any grep/file searching.
+- **NEVER** run broad, unguided `git grep` or `find` loops across `horizon` or `hbm-s-nuclear-tech-git`. It is slow, exhausts context, and causes delays.
+- Pass the absolute repository path (or exact project name) as `project` to MCP tools. Fall back to grep ONLY for raw string literals, configs, or non-code assets (`sounds.json`, `.toml`).
+
+---
+
 ## 3. How to Port a Feature from Java HBM to Rust
 
 When assigned a task to port a subsystem (e.g., Radiation, Centrifuge, RBMK, Grenade):
 
 ### Step 1: Locate Original Java Code in `hbm-s-nuclear-tech-git`
-Search the package structure in `/home/i1off/horizon_repos/hbm-s-nuclear-tech-git/src/main/java/com/hbm/`:
+Query `codebase-memory-mcp` with `project = "/home/i1off/horizon_repos/hbm-s-nuclear-tech-git"`.
+
+Package structure in `/home/i1off/horizon_repos/hbm-s-nuclear-tech-git/src/main/java/com/hbm/`:
 - `hazard/` -> Radiation, toxicity, explosion hazard data.
 - `saveddata/` -> World-level chunk tracking.
 - `tileentity/` -> Machine, reactor, and cable logic.
@@ -91,6 +109,7 @@ Run tests immediately:
 ```bash
 cargo test
 ```
+**Diagnostic Loop Discipline**: Once the root cause is identified during a diagnostic loop, proceed directly to writing a reproduction test or applying the minimal fix; avoid redundant exploratory reads of engine sources.
 
 ### Step 4: Wire Hook Injections
 Add the necessary `[[injection]]` in `mixins/nbm_r/horizon-mixin.toml` and write the thin helper file (e.g., `mixins/nbm_r/tick.rs`).
@@ -99,18 +118,48 @@ Add the necessary `[[injection]]` in `mixins/nbm_r/horizon-mixin.toml` and write
 Always run the validation suite before packaging or distribution:
 ```bash
 export PATH="/home/i1off/.local/share/horizon-launcher/rust/1.99.1-x86_64-unknown-linux-gnu/bin:$PATH"
-cargo test
-python3 tools/validate_content.py
-python3 tools/test_template.py
+python3 tools/check.py
+python3 tools/horizon.py check
 python3 tools/package.py
 ```
+`python3 tools/check.py` is the unified fast check runner (executing `cargo test`, mixin AST template checks, and content invariants).
 `python3 tools/package.py` validates content definitions and builds both artifacts in `target/`:
 - `target/<id>-<version>.hnmod` (the native mixin bundle)
 - `target/<id>-<version>.hmod` (the declarative content bundle)
 
 ---
 
-## 4. Key Reference Documents in this Directory
+## 4. Game Struct Contract for Mixin Hooks
+
+Mixin hook helper files (such as `tick.rs`, `hud.rs`) interact with `&mut Game<'_>`. To maintain compatibility with both the Horizon engine and the template compiler (`tools/test_template.py`), only access the following sanctioned fields and methods:
+
+### Accessible Public Fields on `Game`:
+- `game.positions: &'a mut Vec<[i32; 3]>`: list of block positions.
+- `game.inventory: Vec<Option<ItemStack>>`: main inventory slots (0..36).
+- `game.selected: usize`: currently selected hotbar slot index (0..9).
+- `game.armor: [Option<ItemStack>; 4]`: equipped armor pieces (head, chest, legs, feet).
+- `game.offhand: Option<ItemStack>`: equipped offhand slot item.
+- `game.settings: Settings`: settings with `master_volume: f32` and `volumes: [f32; 11]`.
+
+### Accessible Public Methods on `Game`:
+- `game.native_on(id: &str) -> bool`: check if mod is enabled.
+- `game.native_window() -> bool`: check if running with active window (client side).
+- `game.native_player() -> Option<NativePlayer>`: client-side player coordinates (`x`, `y`, `z`, `yaw`, `pitch`, `dimension`).
+- `game.native_acting_player() -> Option<NativeServerPlayer>`: server-side acting player reference.
+- `game.native_server_players() -> Vec<NativeServerPlayer>`: authoritative list of server players (`uuid`, `name`, `health`, `position`, `dimension`).
+- `game.native_player_stacks(uuid: u128) -> Option<Vec<Option<ItemStack>>>`: inventory stacks of a server player.
+- `game.native_player_equipment(uuid: u128, slot: EquipmentSlot) -> Option<ItemStack>`: equipped armor or held item of a server player.
+- `game.native_run_command(cmd: &str) -> bool`: execute authoritative command on server (`effect`, `kill`).
+- `game.native_chat(msg: &str)`: send local chat message to player.
+- `game.player_menu_sound(sound_id: &str)`: play non-spatial UI audio track.
+- `game.native_play_local_sound(sound_id, at, volume, pitch, delay)`: play spatial sound.
+- `game.native_corner_shown(corner: Corner) -> bool`: check HUD corner visibility.
+- `game.native_fill(batch, rect, argb)`: draw 2D rectangle on HUD.
+- `game.native_text(batch, text, at, color, shadow)`: render text string on HUD.
+- `game.native_text_width(text: &str) -> f32`: measure HUD text width.
+---
+
+## 5. Key Reference Documents in this Directory
 
 - `PORTING_GUIDE.md`: Comprehensive, subsystem-by-subsystem migration roadmap.
 - `MAPPING.md`: Exact mapping table between Java classes/packages and Rust targets.

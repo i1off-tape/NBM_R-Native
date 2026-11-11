@@ -8,7 +8,7 @@
       "asset_id": "nbm_r:hazmat",
       "equip_sound": "minecraft:item.armor.equip_leather"
     },
-    "minecraft:max_damage": 600,
+    "minecraft:max_damage": 780,
     "!minecraft:repairable": {},
     "minecraft:attribute_modifiers": [
       {

@@ -14,37 +14,30 @@ fn nbm_r_hud(
         return;
     };
 
-    let mut items = Vec::new();
-    for slot in 0..9.min(game.inventory.len()) {
-        if let Some(stack) = &game.inventory[slot] {
-            if stack.count > 0 {
-                items.push(stack.item.as_ref());
-            }
-        }
-    }
-    if let Some(stack) = &game.offhand {
-        if stack.count > 0 {
-            items.push(stack.item.as_ref());
-        }
-    }
-
-    if !crate::game::nbm_r::geiger_hud::has_geiger_counter(items) {
+    let has_geiger = crate::game::nbm_r::check_has_geiger_counter(
+        game.inventory
+            .iter()
+            .flatten()
+            .chain(game.offhand.as_ref())
+            .filter(|s| s.count > 0)
+            .map(|s| s.item.as_ref()),
+    );
+    if !has_geiger {
         return;
     }
 
     let dose = crate::game::nbm_r::get_player_dosimetry(0).dose;
 
-    let (cx, cz) = crate::game::nbm_r::dosimetry::pos_to_chunk(p.x, p.z);
-    let chunk_rad = crate::game::nbm_r::get_chunk_radiation(&p.dimension, cx, cz);
-
-    let inv_emission = crate::game::nbm_r::total_item_radiation(
+    let (_, ambient_rate) = crate::game::nbm_r::calculate_ambient_radiation_at(
+        &p.dimension,
+        p.x,
+        p.z,
         game.inventory
             .iter()
             .flatten()
             .chain(game.offhand.as_ref())
             .map(|s| (s.item.as_ref(), s.count)),
     );
-    let ambient_rate = chunk_rad + inv_emission;
 
     let target_angle = crate::game::nbm_r::geiger_hud::target_needle_angle(ambient_rate);
     let needle_angle = crate::game::nbm_r::lock_geiger_hud(|state| {

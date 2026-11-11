@@ -199,10 +199,10 @@ pub mod content {
     pub const TAG_HAZMAT: &str = "#ntm:hazmat";
     pub const TAG_RADIOACTIVE: &str = "#ntm:radioactive";
 
-    /// Default ionizing radiation emission rate for raw Uranium Ingot in Rad/s.
-    pub const URANIUM_INGOT_RAD_PER_SEC: f32 = 1.5;
-    /// Default ionizing radiation emission rate for Uranium Ore block in Rad/s.
-    pub const URANIUM_ORE_RAD_PER_SEC: f32 = 0.5;
+    /// Default ionizing radiation emission rate for raw Uranium Ingot in Rad/s (matching HazardRegistry.u * ingot).
+    pub const URANIUM_INGOT_RAD_PER_SEC: f32 = 0.35;
+    /// Default ionizing radiation emission rate for Uranium Ore block in Rad/s (matching HazardRegistry.u * ore).
+    pub const URANIUM_ORE_RAD_PER_SEC: f32 = 0.35;
 
     /// Uranium ingot stack size limit.
     pub const URANIUM_INGOT_MAX_STACK: u8 = 64;
@@ -427,17 +427,34 @@ pub mod dosimetry {
     }
 
     /// World-level radiation tracking across dimensions and chunks.
-    #[derive(Clone, Debug, Default)]
+    pub const CHUNK_TICK_CADENCE: u32 = 20;
+
+    #[derive(Clone, Debug, Default, PartialEq)]
     pub struct WorldRadiationTracker {
         /// Chunks currently loaded by dimension and chunk coordinate (cx, cz).
         pub loaded_chunks: HashMap<String, HashSet<(i32, i32)>>,
         /// Chunk radiation storage per dimension and chunk coordinate (cx, cz).
         pub chunk_data: HashMap<(String, i32, i32), ChunkRadiationData>,
+        /// Tick counter for 20-tick cadence update (matching HBM's eggTimer in ChunkRadiationManager.java).
+        pub egg_timer: u32,
     }
 
     impl WorldRadiationTracker {
         pub fn new() -> Self {
             Self::default()
+        }
+
+        /// Advance level tick timer and run diffusion and decay if 20-tick cadence is reached.
+        /// Returns true if diffusion and decay were executed on this tick.
+        pub fn step_tick(&mut self, dimension: &str, is_raining: bool) -> bool {
+            self.egg_timer += 1;
+            if self.egg_timer >= CHUNK_TICK_CADENCE {
+                self.egg_timer = 0;
+                self.tick_level(dimension, is_raining);
+                true
+            } else {
+                false
+            }
         }
 
         /// Register chunk as loaded.
@@ -591,7 +608,7 @@ pub mod dosimetry {
         dosimetry.last_ambient_rate = ambient_rate;
         dosimetry.last_absorbed_rate = absorbed_rate;
         if ambient_rate > 0.0 {
-            dosimetry.dose += absorbed_rate * delta_seconds;
+            dosimetry.dose = (dosimetry.dose + absorbed_rate * delta_seconds).min(sickness::MAX_PLAYER_DOSE);
         } else {
             dosimetry.dose = sickness::calculate_natural_recovery(
                 dosimetry.dose,
@@ -618,45 +635,62 @@ pub mod dosimetry {
 
 /// Biological radiation sickness thresholds, status effects, and lethal damage logic.
 pub mod sickness {
-    pub const THRESHOLD_MILD: f32 = 200.0;
-    pub const THRESHOLD_SEVERE: f32 = 500.0;
+    pub const THRESHOLD_STAGE1: f32 = 200.0;
+    pub const THRESHOLD_STAGE2: f32 = 400.0;
+    pub const THRESHOLD_STAGE3: f32 = 600.0;
+    pub const THRESHOLD_STAGE4: f32 = 800.0;
     pub const THRESHOLD_LETHAL: f32 = 1000.0;
+    pub const MAX_PLAYER_DOSE: f32 = 2500.0;
+
+    pub const THRESHOLD_MILD: f32 = THRESHOLD_STAGE1;
+    pub const THRESHOLD_SEVERE: f32 = THRESHOLD_STAGE3;
 
     pub const DAMAGE_TYPE_RADIATION: &str = "ntm:radiation";
-    pub const NATURAL_RECOVERY_RATE: f32 = 0.05; // 0.05 Rad/s in clean environment
+    pub const NATURAL_RECOVERY_RATE: f32 = 0.0; // In original HBM, radiation never passively decays; must be treated with RadAway, pills, or decon shower
     pub const LETHAL_DAMAGE_AMOUNT: f32 = 1000.0;
-    pub const SEVERE_PERIODIC_DAMAGE: f32 = 1.0;
-    pub const SEVERE_DAMAGE_INTERVAL_TICKS: u64 = 100; // 5 seconds (20 ticks/sec * 5)
 
     pub const EFFECT_NAUSEA: &str = "minecraft:nausea";
     pub const EFFECT_SLOWNESS: &str = "minecraft:slowness";
     pub const EFFECT_WEAKNESS: &str = "minecraft:weakness";
-    pub const EFFECT_MINING_FATIGUE: &str = "minecraft:mining_fatigue";
+    pub const EFFECT_POISON: &str = "minecraft:poison";
+    pub const EFFECT_WITHER: &str = "minecraft:wither";
 
     /// Progressive biological sickness stages based on accumulated Rad dose.
+    /// Matches HBM's 5 stages from EntityEffectHandler.java:
+    /// Stage 1 (200..400 Rad), Stage 2 (400..600 Rad), Stage 3 (600..800 Rad),
+    /// Stage 4 (800..1000 Rad), Lethal (>= 1000 Rad).
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum RadiationSicknessStage {
         None,
-        Mild,
-        Severe,
+        Stage1,
+        Stage2,
+        Stage3,
+        Stage4,
         Lethal,
     }
 
     impl RadiationSicknessStage {
+        pub const MILD: Self = Self::Stage1;
+        pub const SEVERE: Self = Self::Stage3;
+
         pub fn from_dose(dose: f32) -> Self {
             if dose >= THRESHOLD_LETHAL {
                 Self::Lethal
-            } else if dose >= THRESHOLD_SEVERE {
-                Self::Severe
-            } else if dose >= THRESHOLD_MILD {
-                Self::Mild
+            } else if dose >= THRESHOLD_STAGE4 {
+                Self::Stage4
+            } else if dose >= THRESHOLD_STAGE3 {
+                Self::Stage3
+            } else if dose >= THRESHOLD_STAGE2 {
+                Self::Stage2
+            } else if dose >= THRESHOLD_STAGE1 {
+                Self::Stage1
             } else {
                 Self::None
             }
         }
 
         pub fn is_sick(&self) -> bool {
-            matches!(self, Self::Mild | Self::Severe | Self::Lethal)
+            !matches!(self, Self::None)
         }
     }
 
@@ -668,31 +702,28 @@ pub mod sickness {
         pub duration_ticks: i32,
     }
 
+    /// Lethal command executed when dose exceeds lethal threshold.
+    pub const LETHAL_COMMAND: &str = "kill @p";
+
+    impl StatusEffect {
+        /// Format command to apply this effect to an entity target in Horizon.
+        pub fn to_command(&self, target: &str) -> String {
+            let duration_sec = (self.duration_ticks / 20).max(1);
+            format!(
+                "effect give {} {} {} {} true",
+                target, self.id, duration_sec, self.amplifier
+            )
+        }
+    }
+
     /// Retrieve the status effects inflicted by a given sickness stage.
     pub fn get_stage_effects(stage: RadiationSicknessStage) -> Vec<StatusEffect> {
         match stage {
             RadiationSicknessStage::None => Vec::new(),
-            RadiationSicknessStage::Mild => vec![
+            RadiationSicknessStage::Stage1 => vec![
                 StatusEffect {
                     id: EFFECT_NAUSEA,
                     amplifier: 0,
-                    duration_ticks: 100,
-                },
-                StatusEffect {
-                    id: EFFECT_SLOWNESS,
-                    amplifier: 0,
-                    duration_ticks: 100,
-                },
-            ],
-            RadiationSicknessStage::Severe => vec![
-                StatusEffect {
-                    id: EFFECT_NAUSEA,
-                    amplifier: 0,
-                    duration_ticks: 100,
-                },
-                StatusEffect {
-                    id: EFFECT_SLOWNESS,
-                    amplifier: 1,
                     duration_ticks: 100,
                 },
                 StatusEffect {
@@ -700,38 +731,105 @@ pub mod sickness {
                     amplifier: 0,
                     duration_ticks: 100,
                 },
+            ],
+            RadiationSicknessStage::Stage2 => vec![
                 StatusEffect {
-                    id: EFFECT_MINING_FATIGUE,
+                    id: EFFECT_NAUSEA,
+                    amplifier: 0,
+                    duration_ticks: 150,
+                },
+                StatusEffect {
+                    id: EFFECT_SLOWNESS,
                     amplifier: 0,
                     duration_ticks: 100,
+                },
+                StatusEffect {
+                    id: EFFECT_WEAKNESS,
+                    amplifier: 1,
+                    duration_ticks: 100,
+                },
+            ],
+            RadiationSicknessStage::Stage3 => vec![
+                StatusEffect {
+                    id: EFFECT_NAUSEA,
+                    amplifier: 0,
+                    duration_ticks: 150,
+                },
+                StatusEffect {
+                    id: EFFECT_SLOWNESS,
+                    amplifier: 2,
+                    duration_ticks: 200,
+                },
+                StatusEffect {
+                    id: EFFECT_WEAKNESS,
+                    amplifier: 2,
+                    duration_ticks: 200,
+                },
+                StatusEffect {
+                    id: EFFECT_POISON,
+                    amplifier: 1,
+                    duration_ticks: 60,
+                },
+            ],
+            RadiationSicknessStage::Stage4 => vec![
+                StatusEffect {
+                    id: EFFECT_NAUSEA,
+                    amplifier: 0,
+                    duration_ticks: 150,
+                },
+                StatusEffect {
+                    id: EFFECT_SLOWNESS,
+                    amplifier: 2,
+                    duration_ticks: 200,
+                },
+                StatusEffect {
+                    id: EFFECT_WEAKNESS,
+                    amplifier: 2,
+                    duration_ticks: 200,
+                },
+                StatusEffect {
+                    id: EFFECT_POISON,
+                    amplifier: 2,
+                    duration_ticks: 60,
+                },
+                StatusEffect {
+                    id: EFFECT_WITHER,
+                    amplifier: 1,
+                    duration_ticks: 60,
                 },
             ],
             RadiationSicknessStage::Lethal => vec![
                 StatusEffect {
                     id: EFFECT_NAUSEA,
                     amplifier: 0,
-                    duration_ticks: 100,
+                    duration_ticks: 150,
                 },
                 StatusEffect {
                     id: EFFECT_SLOWNESS,
                     amplifier: 2,
-                    duration_ticks: 100,
+                    duration_ticks: 200,
                 },
                 StatusEffect {
                     id: EFFECT_WEAKNESS,
-                    amplifier: 1,
-                    duration_ticks: 100,
+                    amplifier: 2,
+                    duration_ticks: 200,
                 },
                 StatusEffect {
-                    id: EFFECT_MINING_FATIGUE,
+                    id: EFFECT_POISON,
+                    amplifier: 2,
+                    duration_ticks: 60,
+                },
+                StatusEffect {
+                    id: EFFECT_WITHER,
                     amplifier: 1,
-                    duration_ticks: 100,
+                    duration_ticks: 60,
                 },
             ],
         }
     }
 
     /// Evaluation result of radiation sickness on an entity.
+    #[must_use = "Sickness evaluation must be applied to the game entity via effects or damage"]
     #[derive(Clone, Debug, PartialEq)]
     pub struct SicknessEvaluation {
         pub stage: RadiationSicknessStage,
@@ -741,7 +839,7 @@ pub mod sickness {
     }
 
     /// Evaluate biological radiation sickness effects and damage for a given dose and tick.
-    pub fn evaluate_sickness(dose: f32, ticks: u64) -> SicknessEvaluation {
+    pub fn evaluate_sickness(dose: f32, _ticks: u64) -> SicknessEvaluation {
         let stage = RadiationSicknessStage::from_dose(dose);
         let effects = get_stage_effects(stage);
         let (damage, damage_type) = match stage {
@@ -749,16 +847,6 @@ pub mod sickness {
                 Some(LETHAL_DAMAGE_AMOUNT),
                 Some(DAMAGE_TYPE_RADIATION),
             ),
-            RadiationSicknessStage::Severe => {
-                if ticks % SEVERE_DAMAGE_INTERVAL_TICKS == 0 {
-                    (
-                        Some(SEVERE_PERIODIC_DAMAGE),
-                        Some(DAMAGE_TYPE_RADIATION),
-                    )
-                } else {
-                    (None, None)
-                }
-            }
             _ => (None, None),
         };
         SicknessEvaluation {
@@ -769,15 +857,15 @@ pub mod sickness {
         }
     }
 
-    /// Calculate natural biological dose recovery in clean (zero-radiation) environment.
-    /// When ambient radiation is 0 (or <= 0), recovers by 0.05 Rad/s.
-    /// When exposed to radiation (ambient > 0), no natural recovery occurs.
+    /// Calculate biological dose recovery in clean (zero-radiation) environment.
+    /// HBM parity: zero passive decay (NATURAL_RECOVERY_RATE = 0.0). Retained for optional RadAway/decon mechanics.
+    #[allow(dead_code)]
     pub fn calculate_natural_recovery(
         current_dose: f32,
         ambient_rate: f32,
         delta_seconds: f32,
     ) -> f32 {
-        if ambient_rate <= 0.0 {
+        if NATURAL_RECOVERY_RATE > 0.0 && ambient_rate <= 0.0 {
             (current_dose - NATURAL_RECOVERY_RATE * delta_seconds).max(0.0)
         } else {
             current_dose
@@ -922,22 +1010,219 @@ pub mod geiger_hud {
         base.clamp(0.0, 1.0) * master.clamp(0.0, 1.0) * category.clamp(0.0, 1.0)
     }
 
+    /// Authentic Java 1.7.10 Geiger sound candidate pool calculation:
+    /// Returns a fixed-size buffer with slice of sound tier candidates [0..6] (where 0 is silence).
+    pub fn geiger_sound_candidates(ambient_rad: f32) -> ([u8; 8], usize) {
+        let mut candidates = [0u8; 8];
+        let mut count = 0;
+
+        if ambient_rad < 1.0 {
+            candidates[count] = 0;
+            count += 1;
+        }
+        if ambient_rad < 5.0 {
+            candidates[count] = 0;
+            count += 1;
+        }
+        if ambient_rad < 10.0 {
+            candidates[count] = 1;
+            count += 1;
+        }
+        if ambient_rad > 5.0 && ambient_rad < 15.0 {
+            candidates[count] = 2;
+            count += 1;
+        }
+        if ambient_rad > 10.0 && ambient_rad < 20.0 {
+            candidates[count] = 3;
+            count += 1;
+        }
+        if ambient_rad > 15.0 && ambient_rad < 25.0 {
+            candidates[count] = 4;
+            count += 1;
+        }
+        if ambient_rad > 20.0 && ambient_rad < 30.0 {
+            candidates[count] = 5;
+            count += 1;
+        }
+        if ambient_rad > 25.0 {
+            candidates[count] = 6;
+            count += 1;
+        }
+
+        (candidates, count)
+    }
+
+    /// Select which Geiger sound tier (1..=6) to play given ambient_rad and a uniform random roll [0.0..1.0).
+    /// Returns `None` if silence should be played.
+    pub fn select_geiger_sound(ambient_rad: f32, rand_val: f32) -> Option<u8> {
+        if ambient_rad > MIN_RAD_THRESHOLD {
+            let (candidates, count) = geiger_sound_candidates(ambient_rad);
+            if count == 0 {
+                return None;
+            }
+            let idx = ((rand_val.clamp(0.0, 0.99999)) * count as f32) as usize;
+            let choice = candidates[idx.min(count - 1)];
+            if choice > 0 {
+                Some(choice)
+            } else {
+                None
+            }
+        } else {
+            // 1 in 50 background cosmic ray click
+            if rand_val < (1.0 / 50.0) {
+                Some(1)
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Authentic right-click diagnostic sound event (mapped to Horizon's player category via item. prefix).
+    pub const SOUND_TECH_BOOP: &str = "nbm_r:item.techBoop";
+
+    /// Map sound tier (1..=6) to canonical sound event identifier with item. prefix.
+    pub fn geiger_sound_event(tier: u8) -> &'static str {
+        match tier {
+            1 => "nbm_r:item.geiger1",
+            2 => "nbm_r:item.geiger2",
+            3 => "nbm_r:item.geiger3",
+            4 => "nbm_r:item.geiger4",
+            5 => "nbm_r:item.geiger5",
+            6 => "nbm_r:item.geiger6",
+            _ => "nbm_r:item.geiger1",
+        }
+    }
+
+    /// Formatted Geiger Counter diagnostic summary matching Java 1.7.10 ContaminationUtil.printGeigerData.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct GeigerSummary {
+        pub title: String,
+        pub chunk_rad: String,
+        pub env_rad: String,
+        pub player_rad: String,
+        pub player_res: String,
+    }
+
+    impl GeigerSummary {
+        pub fn lines(&self) -> [&str; 5] {
+            [
+                &self.title,
+                &self.chunk_rad,
+                &self.env_rad,
+                &self.player_rad,
+                &self.player_res,
+            ]
+        }
+    }
+
+    /// Color prefix helper matching Java ContaminationUtil.getPreffixFromRad.
+    pub fn rad_prefix(rad: f32) -> &'static str {
+        if rad <= 0.0 {
+            "§a" // Green
+        } else if rad < 1.0 {
+            "§e" // Yellow
+        } else if rad < 10.0 {
+            "§6" // Gold
+        } else if rad < 100.0 {
+            "§c" // Red
+        } else if rad < 1000.0 {
+            "§4" // Dark Red
+        } else {
+            "§8" // Dark Gray
+        }
+    }
+
+    /// Color prefix helper for accumulated player dose.
+    pub fn dose_prefix(dose: f32) -> &'static str {
+        if dose < 200.0 {
+            "§a" // Green
+        } else if dose < 400.0 {
+            "§e" // Yellow
+        } else if dose < 600.0 {
+            "§6" // Gold
+        } else if dose < 800.0 {
+            "§c" // Red
+        } else if dose < 1000.0 {
+            "§4" // Dark Red
+        } else {
+            "§8" // Dark Gray
+        }
+    }
+
+    /// Format right-click Geiger summary for chat output matching Java HBM ContaminationUtil.printGeigerData.
+    pub fn format_geiger_summary(
+        chunk_rad: f32,
+        env_rad: f32,
+        player_dose: f32,
+        hazmat_pieces: usize,
+    ) -> GeigerSummary {
+        let e_rad = ((player_dose * 10.0) as i64 as f64) / 10.0;
+        let rads = ((chunk_rad * 10.0) as i64 as f64) / 10.0;
+        let env = ((env_rad * 10.0) as i64 as f64) / 10.0;
+
+        let pieces = (hazmat_pieces.min(4) as f32) * 0.5;
+        let res_koeff = ((pieces * 100.0) as i64 as f64) / 100.0;
+        let rad_mod = 10.0_f64.powf(-res_koeff);
+        let res = (((10000.0 - rad_mod * 10000.0) as i64) as f64) / 100.0;
+
+        let chunk_prefix = rad_prefix(rads as f32);
+        let env_prefix = rad_prefix(env as f32);
+        let rad_color = dose_prefix(e_rad as f32);
+        let res_color = if res_koeff > 0.0 { "§a" } else { "§f" };
+
+        GeigerSummary {
+            title: "§6===== ☢ Geiger Counter ☢ =====".to_string(),
+            chunk_rad: format!("§eChunk Rad: {chunk_prefix}{:.1} RAD/s", rads),
+            env_rad: format!("§eEnv Rad: {env_prefix}{:.1} RAD/s", env),
+            player_rad: format!("§ePlayer Rad: {rad_color}{:.1} RAD", e_rad),
+            player_res: format!("§ePlayer Res: {res_color}{:.2}% ({:.2})", res, res_koeff),
+        }
+    }
+
     /// Client state for Geiger click audio scheduling.
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct GeigerAudioState {
         /// Accumulated time in seconds since last click.
         pub accumulator: f32,
+        /// Tick counter for 5-tick evaluation cadence (Java parity: world.getTotalWorldTime() % 5 == 0).
+        pub tick_counter: u32,
+        /// Internal deterministic PRNG state.
+        pub rng_state: u64,
     }
 
     impl Default for GeigerAudioState {
         fn default() -> Self {
-            Self { accumulator: 0.0 }
+            Self {
+                accumulator: 0.0,
+                tick_counter: 0,
+                rng_state: 0x853c49e6748fea9b,
+            }
         }
     }
 
     impl GeigerAudioState {
         pub fn new() -> Self {
             Self::default()
+        }
+
+        pub fn next_rand_f32(&mut self) -> f32 {
+            self.rng_state = self
+                .rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let val = (self.rng_state >> 32) as u32;
+            (val as f32) / (u32::MAX as f32)
+        }
+
+        /// Step 5-tick cadence and return sound tier (1..=6) or None if silence.
+        pub fn step_tick(&mut self, ambient_rad: f32) -> Option<u8> {
+            self.tick_counter = self.tick_counter.wrapping_add(1);
+            if self.tick_counter % 5 == 0 {
+                let rand_val = self.next_rand_f32();
+                select_geiger_sound(ambient_rad, rand_val)
+            } else {
+                None
+            }
         }
 
         /// Advance timer by `dt` seconds given `ambient_rad`.
@@ -1029,6 +1314,9 @@ where
     f(state)
 }
 
+/// Global synchronization lock for tests modifying static state.
+pub static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Reset world radiation and player dosimetry state (useful for tests and level unloading).
 pub fn reset_state() {
     let mut w = WORLD_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
@@ -1050,6 +1338,12 @@ pub fn on_chunk_unload(dimension: &str, chunk: [i32; 2]) {
 }
 
 pub fn on_level_tick(dimension: &str, is_raining: bool) {
+    lock_tracker(|t| {
+        t.step_tick(dimension, is_raining);
+    });
+}
+
+pub fn force_level_tick(dimension: &str, is_raining: bool) {
     lock_tracker(|t| t.tick_level(dimension, is_raining));
 }
 
@@ -1084,6 +1378,42 @@ pub fn set_player_dose(uuid: u128, dose: f32) {
     });
 }
 
+/// Helper to calculate chunk radiation and total ambient radiation at a position.
+pub fn calculate_ambient_radiation_at<'a, I>(
+    dimension: &str,
+    x: f64,
+    z: f64,
+    items: I,
+) -> (f32, f32)
+where
+    I: IntoIterator<Item = (&'a str, u32)>,
+{
+    let (cx, cz) = dosimetry::pos_to_chunk(x, z);
+    let chunk_rad = get_chunk_radiation(dimension, cx, cz);
+    let inv_emission = total_item_radiation(items);
+    let ambient_rad = chunk_rad + inv_emission;
+    (chunk_rad, ambient_rad)
+}
+
+/// Helper to count hazmat pieces in an iterator of item identifiers.
+pub fn count_hazmat_pieces<'a, I>(items: I) -> usize
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    items
+        .into_iter()
+        .filter(|item_id| content::is_hazmat_piece(item_id))
+        .count()
+}
+
+/// Helper to check if any item in the stream is a geiger counter.
+pub fn check_has_geiger_counter<'a, I>(items: I) -> bool
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    geiger_hud::has_geiger_counter(items)
+}
+
 pub fn record_player_exposure(
     uuid: u128,
     chunk_rad: f32,
@@ -1106,11 +1436,7 @@ pub fn record_player_exposure(
 pub fn tick_player_sickness(uuid: u128) -> sickness::SicknessEvaluation {
     lock_players(|m| {
         let entry = m.entry(uuid).or_default();
-        let eval = sickness::evaluate_sickness(entry.dose, entry.ticks_alive);
-        if eval.stage == sickness::RadiationSicknessStage::Lethal {
-            entry.dose = 0.0;
-        }
-        eval
+        sickness::evaluate_sickness(entry.dose, entry.ticks_alive)
     })
 }
 
@@ -1119,6 +1445,16 @@ pub fn on_player_death(uuid: u128) {
         if let Some(entry) = m.get_mut(&uuid) {
             entry.dose = 0.0;
             entry.ticks_alive = 0;
+            entry.last_ambient_rate = 0.0;
+            entry.last_absorbed_rate = 0.0;
+        }
+        if uuid != 0 {
+            if let Some(entry) = m.get_mut(&0) {
+                entry.dose = 0.0;
+                entry.ticks_alive = 0;
+                entry.last_ambient_rate = 0.0;
+                entry.last_absorbed_rate = 0.0;
+            }
         }
     });
 }
@@ -1159,7 +1495,6 @@ mod tests {
     use std::collections::HashMap;
 
     const EPSILON: f32 = 1e-4;
-    static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn formats_break_message() {
@@ -1402,9 +1737,9 @@ mod tests {
         assert!(content::is_hazmat_piece("ntm:hazmat_helmet"));
         assert!(!content::is_hazmat_piece("minecraft:iron_helmet"));
 
-        assert_eq!(content::item_radiation_emission(content::ITEM_URANIUM_INGOT), 1.5);
-        assert_eq!(content::item_radiation_emission("ntm:ingot_uranium"), 1.5);
-        assert_eq!(content::item_radiation_emission(content::BLOCK_URANIUM_ORE), 0.5);
+        assert_eq!(content::item_radiation_emission(content::ITEM_URANIUM_INGOT), 0.35);
+        assert_eq!(content::item_radiation_emission("ntm:ingot_uranium"), 0.35);
+        assert_eq!(content::item_radiation_emission(content::BLOCK_URANIUM_ORE), 0.35);
         assert_eq!(content::item_radiation_emission("minecraft:stone"), 0.0);
 
         assert_eq!(content::URANIUM_INGOT_MAX_STACK, 64);
@@ -1498,6 +1833,24 @@ mod tests {
     }
 
     #[test]
+    fn test_chunk_tick_cadence() {
+        let mut tracker = dosimetry::WorldRadiationTracker::new();
+        let dim = "minecraft:overworld";
+        tracker.set_chunk_data(dim, 0, 0, dosimetry::ChunkRadiationData::new(100.0, 0.0));
+
+        // Ticks 1 to 19: step_tick returns false, chunk radiation remains 100.0
+        for _ in 1..20 {
+            assert!(!tracker.step_tick(dim, false));
+            assert_eq!(tracker.get_chunk_data(dim, 0, 0).rad, 100.0);
+        }
+
+        // Tick 20: step_tick executes diffusion/decay and returns true
+        assert!(tracker.step_tick(dim, false));
+        let center = tracker.get_chunk_data(dim, 0, 0).rad;
+        assert!((center - 59.35).abs() < EPSILON);
+    }
+
+    #[test]
     fn test_player_ambient_exposure_calculation() {
         // Ambient chunk rad only
         let chunk_rad = 5.0;
@@ -1508,8 +1861,8 @@ mod tests {
         );
 
         // Chunk rad + radioactive inventory items:
-        // 10 Uranium Ingots (1.5 Rad/s each) = 15.0 Rad/s
-        // 2 Uranium Ore (0.5 Rad/s each) = 1.0 Rad/s
+        // 10 Uranium Ingots (0.35 Rad/s each) = 3.5 Rad/s
+        // 2 Uranium Ore (0.35 Rad/s each) = 0.7 Rad/s
         // 64 Stone (0.0 Rad/s) = 0.0 Rad/s
         let inventory = vec![
             (content::ITEM_URANIUM_INGOT, 10),
@@ -1517,15 +1870,12 @@ mod tests {
             ("minecraft:stone", 64),
         ];
         let total_ambient = dosimetry::calculate_ambient_exposure(chunk_rad, &inventory);
-        // Expected = 5.0 + (10 * 1.5) + (2 * 0.5) = 5.0 + 15.0 + 1.0 = 21.0 Rad/s
-        assert!((total_ambient - 21.0).abs() < EPSILON);
+        // Expected = 5.0 + (10 * 0.35) + (2 * 0.35) = 5.0 + 3.5 + 0.7 = 9.2 Rad/s
+        assert!((total_ambient - 9.2).abs() < EPSILON);
 
         // Alternative namespace tags: "ntm:ingot_uranium"
         let alt_inventory = vec![("ntm:ingot_uranium", 4)];
-        assert_eq!(
-            dosimetry::calculate_ambient_exposure(0.0, &alt_inventory),
-            6.0
-        );
+        assert!((dosimetry::calculate_ambient_exposure(0.0, &alt_inventory) - 1.4).abs() < EPSILON);
     }
 
     #[test]
@@ -1553,8 +1903,8 @@ mod tests {
     fn test_step_player_dosimetry_accumulation() {
         let mut player = dosimetry::PlayerDosimetryData::new(0.0);
         let chunk_rad = 10.0;
-        let inventory = [(content::ITEM_URANIUM_INGOT, 6)]; // 6 * 1.5 = 9.0 Rad/s
-        // Total ambient = 10.0 + 9.0 = 19.0 Rad/s
+        let inventory = [(content::ITEM_URANIUM_INGOT, 6)]; // 6 * 0.35 = 2.1 Rad/s
+        // Total ambient = 10.0 + 2.1 = 12.1 Rad/s
 
         // Without hazmat: 1 tick (0.05s)
         let rate_unshielded = dosimetry::step_player_dosimetry(
@@ -1564,12 +1914,12 @@ mod tests {
             0,
             0.05,
         );
-        assert!((rate_unshielded - 19.0).abs() < EPSILON);
-        assert_eq!(player.last_ambient_rate, 19.0);
-        assert_eq!(player.last_absorbed_rate, 19.0);
-        assert!((player.dose - 19.0 * 0.05).abs() < EPSILON);
+        assert!((rate_unshielded - 12.1).abs() < EPSILON);
+        assert_eq!(player.last_ambient_rate, 12.1);
+        assert_eq!(player.last_absorbed_rate, 12.1);
+        assert!((player.dose - 12.1 * 0.05).abs() < EPSILON);
 
-        // With full hazmat suit (4 pieces): 99% attenuation -> absorbed rate = 0.19 Rad/s
+        // With full hazmat suit (4 pieces): 99% attenuation -> absorbed rate = 0.121 Rad/s
         let mut protected_player = dosimetry::PlayerDosimetryData::new(0.0);
         let rate_shielded = dosimetry::step_player_dosimetry(
             &mut protected_player,
@@ -1578,10 +1928,10 @@ mod tests {
             4,
             0.05,
         );
-        assert!((rate_shielded - 0.19).abs() < EPSILON);
-        assert_eq!(protected_player.last_ambient_rate, 19.0);
-        assert!((protected_player.last_absorbed_rate - 0.19).abs() < EPSILON);
-        assert!((protected_player.dose - 0.19 * 0.05).abs() < EPSILON);
+        assert!((rate_shielded - 0.121).abs() < EPSILON);
+        assert_eq!(protected_player.last_ambient_rate, 12.1);
+        assert!((protected_player.last_absorbed_rate - 0.121).abs() < EPSILON);
+        assert!((protected_player.dose - 0.121 * 0.05).abs() < EPSILON);
 
         // Over 20 ticks (1 full second)
         let mut sim_player = dosimetry::PlayerDosimetryData::new(0.0);
@@ -1619,7 +1969,7 @@ mod tests {
         assert_eq!(get_chunk_radiation(dim, 1, 2), 50.0);
 
         // Level tick
-        on_level_tick(dim, false);
+        force_level_tick(dim, false);
         let center = get_chunk_radiation(dim, 1, 2);
         // 50.0 * 0.60 = 30.0 -> 30.0 * 0.99 - 0.05 = 29.65
         assert!((center - 29.65).abs() < EPSILON);
@@ -1627,13 +1977,13 @@ mod tests {
         // Player exposure record
         let inv = [(content::ITEM_URANIUM_INGOT, 2)];
         let rate = record_player_exposure(uuid, center, &inv, 4, 0.05);
-        // Ambient = 29.65 + 3.0 = 32.65 -> full hazmat 1% = 0.3265
-        assert!((rate - 0.3265).abs() < EPSILON);
+        // Ambient = 29.65 + 0.70 = 30.35 -> full hazmat 1% = 0.3035
+        assert!((rate - 0.3035).abs() < EPSILON);
 
         let data = get_player_dosimetry(uuid);
-        assert!((data.dose - 0.3265 * 0.05).abs() < EPSILON);
-        assert!((data.last_ambient_rate - 32.65).abs() < EPSILON);
-        assert!((data.last_absorbed_rate - 0.3265).abs() < EPSILON);
+        assert!((data.dose - 0.3035 * 0.05).abs() < EPSILON);
+        assert!((data.last_ambient_rate - 30.35).abs() < EPSILON);
+        assert!((data.last_absorbed_rate - 0.3035).abs() < EPSILON);
 
         set_player_dose(uuid, 500.0);
         assert_eq!(get_player_dosimetry(uuid).dose, 500.0);
@@ -1650,40 +2000,51 @@ mod tests {
         assert!(healthy_eval.effects.is_empty());
         assert_eq!(healthy_eval.damage, None);
 
-        let sub_mild_eval = sickness::evaluate_sickness(199.9, 100);
-        assert_eq!(sub_mild_eval.stage, sickness::RadiationSicknessStage::None);
-        assert!(sub_mild_eval.effects.is_empty());
+        let sub_stage1_eval = sickness::evaluate_sickness(199.9, 100);
+        assert_eq!(sub_stage1_eval.stage, sickness::RadiationSicknessStage::None);
+        assert!(sub_stage1_eval.effects.is_empty());
 
-        // Mild: 200 <= dose < 500 Rad -> Nausea and Slowness
-        let mild_eval = sickness::evaluate_sickness(200.0, 100);
-        assert_eq!(mild_eval.stage, sickness::RadiationSicknessStage::Mild);
-        assert_eq!(mild_eval.damage, None);
-        let effect_ids: Vec<&str> = mild_eval.effects.iter().map(|e| e.id).collect();
-        assert!(effect_ids.contains(&sickness::EFFECT_NAUSEA));
-        assert!(effect_ids.contains(&sickness::EFFECT_SLOWNESS));
-        assert!(!effect_ids.contains(&sickness::EFFECT_WEAKNESS));
+        // Stage 1: 200 <= dose < 400 Rad -> Nausea and Weakness
+        let stage1_eval = sickness::evaluate_sickness(200.0, 100);
+        assert_eq!(stage1_eval.stage, sickness::RadiationSicknessStage::Stage1);
+        assert_eq!(stage1_eval.damage, None);
+        let s1_effects: Vec<&str> = stage1_eval.effects.iter().map(|e| e.id).collect();
+        assert!(s1_effects.contains(&sickness::EFFECT_NAUSEA));
+        assert!(s1_effects.contains(&sickness::EFFECT_WEAKNESS));
+        assert!(!s1_effects.contains(&sickness::EFFECT_SLOWNESS));
 
-        let sub_severe_eval = sickness::evaluate_sickness(499.9, 100);
-        assert_eq!(sub_severe_eval.stage, sickness::RadiationSicknessStage::Mild);
+        // Stage 2: 400 <= dose < 600 Rad -> Nausea, Slowness, Weakness
+        let stage2_eval = sickness::evaluate_sickness(450.0, 100);
+        assert_eq!(stage2_eval.stage, sickness::RadiationSicknessStage::Stage2);
+        assert_eq!(stage2_eval.damage, None);
+        let s2_effects: Vec<&str> = stage2_eval.effects.iter().map(|e| e.id).collect();
+        assert!(s2_effects.contains(&sickness::EFFECT_NAUSEA));
+        assert!(s2_effects.contains(&sickness::EFFECT_SLOWNESS));
+        assert!(s2_effects.contains(&sickness::EFFECT_WEAKNESS));
+        assert!(!s2_effects.contains(&sickness::EFFECT_POISON));
 
-        // Severe: 500 <= dose < 1000 Rad -> Nausea, Slowness, Weakness, Mining Fatigue, periodic damage
-        let severe_interval = sickness::evaluate_sickness(500.0, 100);
-        assert_eq!(severe_interval.stage, sickness::RadiationSicknessStage::Severe);
-        let severe_effect_ids: Vec<&str> = severe_interval.effects.iter().map(|e| e.id).collect();
-        assert!(severe_effect_ids.contains(&sickness::EFFECT_NAUSEA));
-        assert!(severe_effect_ids.contains(&sickness::EFFECT_SLOWNESS));
-        assert!(severe_effect_ids.contains(&sickness::EFFECT_WEAKNESS));
-        assert!(severe_effect_ids.contains(&sickness::EFFECT_MINING_FATIGUE));
-        assert_eq!(severe_interval.damage, Some(sickness::SEVERE_PERIODIC_DAMAGE));
-        assert_eq!(severe_interval.damage_type, Some(sickness::DAMAGE_TYPE_RADIATION));
+        // Stage 3: 600 <= dose < 800 Rad -> Nausea, Slowness, Weakness, Poison
+        let stage3_eval = sickness::evaluate_sickness(650.0, 100);
+        assert_eq!(stage3_eval.stage, sickness::RadiationSicknessStage::Stage3);
+        let s3_effects: Vec<&str> = stage3_eval.effects.iter().map(|e| e.id).collect();
+        assert!(s3_effects.contains(&sickness::EFFECT_NAUSEA));
+        assert!(s3_effects.contains(&sickness::EFFECT_SLOWNESS));
+        assert!(s3_effects.contains(&sickness::EFFECT_WEAKNESS));
+        assert!(s3_effects.contains(&sickness::EFFECT_POISON));
+        assert!(!s3_effects.contains(&sickness::EFFECT_WITHER));
 
-        // Severe on non-periodic tick -> no damage
-        let severe_non_interval = sickness::evaluate_sickness(500.0, 101);
-        assert_eq!(severe_non_interval.stage, sickness::RadiationSicknessStage::Severe);
-        assert_eq!(severe_non_interval.damage, None);
+        // Stage 4: 800 <= dose < 1000 Rad -> Nausea, Slowness, Weakness, Poison, Wither
+        let stage4_eval = sickness::evaluate_sickness(850.0, 100);
+        assert_eq!(stage4_eval.stage, sickness::RadiationSicknessStage::Stage4);
+        let s4_effects: Vec<&str> = stage4_eval.effects.iter().map(|e| e.id).collect();
+        assert!(s4_effects.contains(&sickness::EFFECT_NAUSEA));
+        assert!(s4_effects.contains(&sickness::EFFECT_SLOWNESS));
+        assert!(s4_effects.contains(&sickness::EFFECT_WEAKNESS));
+        assert!(s4_effects.contains(&sickness::EFFECT_POISON));
+        assert!(s4_effects.contains(&sickness::EFFECT_WITHER));
 
         let sub_lethal = sickness::evaluate_sickness(999.9, 100);
-        assert_eq!(sub_lethal.stage, sickness::RadiationSicknessStage::Severe);
+        assert_eq!(sub_lethal.stage, sickness::RadiationSicknessStage::Stage4);
 
         // Lethal: dose >= 1000 Rad -> Lethal organ damage via custom ntm:radiation
         let lethal_eval = sickness::evaluate_sickness(1000.0, 101);
@@ -1699,21 +2060,16 @@ mod tests {
 
     #[test]
     fn test_natural_dose_recovery_in_clean_environment_vs_exposed() {
-        // In clean environment (ambient = 0.0), natural recovery rate is 0.05 Rad/s
+        // In original HBM (HbmLivingProps.java), radiation does not naturally decay
         let mut recovering_player = dosimetry::PlayerDosimetryData::new(100.0);
         for _ in 0..20 {
-            // 20 ticks * 0.05s = 1.0 second
+            // 20 ticks * 0.05s = 1.0 second in clean environment
             dosimetry::step_player_dosimetry(&mut recovering_player, 0.0, &[], 0, 0.05);
         }
-        // Expected reduction: 0.05 Rad -> 99.95 Rad
-        assert!((recovering_player.dose - 99.95).abs() < EPSILON);
+        // Dose remains 100.0 Rad (no natural decay)
+        assert!((recovering_player.dose - 100.0).abs() < EPSILON);
 
-        // Test clamping at 0.0
-        let mut low_dose_player = dosimetry::PlayerDosimetryData::new(0.02);
-        dosimetry::step_player_dosimetry(&mut low_dose_player, 0.0, &[], 0, 1.0);
-        assert_eq!(low_dose_player.dose, 0.0);
-
-        // In contaminated environment (ambient > 0), no recovery occurs; dose increases
+        // In contaminated environment (ambient > 0), dose increases
         let mut exposed_player = dosimetry::PlayerDosimetryData::new(100.0);
         dosimetry::step_player_dosimetry(&mut exposed_player, 10.0, &[], 0, 1.0);
         // Ambient 10.0 Rad/s for 1.0s -> dose = 100.0 + 10.0 = 110.0 Rad
@@ -1783,16 +2139,16 @@ mod tests {
         let eval_healthy = tick_player_sickness(uuid);
         assert_eq!(eval_healthy.stage, sickness::RadiationSicknessStage::None);
 
-        // Escalate to Mild
+        // Escalate to Stage 1
         set_player_dose(uuid, 250.0);
-        let eval_mild = tick_player_sickness(uuid);
-        assert_eq!(eval_mild.stage, sickness::RadiationSicknessStage::Mild);
-        assert_eq!(eval_mild.damage, None);
+        let eval_stage1 = tick_player_sickness(uuid);
+        assert_eq!(eval_stage1.stage, sickness::RadiationSicknessStage::Stage1);
+        assert_eq!(eval_stage1.damage, None);
 
-        // Escalate to Severe
-        set_player_dose(uuid, 600.0);
-        let eval_severe = tick_player_sickness(uuid);
-        assert_eq!(eval_severe.stage, sickness::RadiationSicknessStage::Severe);
+        // Escalate to Stage 3
+        set_player_dose(uuid, 650.0);
+        let eval_stage3 = tick_player_sickness(uuid);
+        assert_eq!(eval_stage3.stage, sickness::RadiationSicknessStage::Stage3);
 
         // Escalate to Lethal
         set_player_dose(uuid, 1200.0);
@@ -1800,7 +2156,9 @@ mod tests {
         assert_eq!(eval_lethal.stage, sickness::RadiationSicknessStage::Lethal);
         assert_eq!(eval_lethal.damage, Some(sickness::LETHAL_DAMAGE_AMOUNT));
         assert_eq!(eval_lethal.damage_type, Some(sickness::DAMAGE_TYPE_RADIATION));
-        // Lethal execution resets dose
+        // Dose remains accumulated across evaluations until on_player_death
+        assert_eq!(get_player_dosimetry(uuid).dose, 1200.0);
+        on_player_death(uuid);
         assert_eq!(get_player_dosimetry(uuid).dose, 0.0);
 
         // Save & load session persistence
@@ -1828,8 +2186,65 @@ mod tests {
     }
 
     #[test]
+    fn test_sickness_command_generation_and_lethal_dispatch() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        reset_state();
+        let uuid = 7777u128;
+
+        // Verify StatusEffect command formatting for each effect
+        let nausea = sickness::StatusEffect {
+            id: sickness::EFFECT_NAUSEA,
+            amplifier: 0,
+            duration_ticks: 100,
+        };
+        assert_eq!(
+            nausea.to_command("@p"),
+            "effect give @p minecraft:nausea 5 0 true"
+        );
+
+        let weakness = sickness::StatusEffect {
+            id: sickness::EFFECT_WEAKNESS,
+            amplifier: 2,
+            duration_ticks: 200,
+        };
+        assert_eq!(
+            weakness.to_command("@p"),
+            "effect give @p minecraft:weakness 10 2 true"
+        );
+
+        // Verify each stage formats non-empty valid commands
+        for &stage in &[
+            sickness::RadiationSicknessStage::Stage1,
+            sickness::RadiationSicknessStage::Stage2,
+            sickness::RadiationSicknessStage::Stage3,
+            sickness::RadiationSicknessStage::Stage4,
+        ] {
+            let effects = sickness::get_stage_effects(stage);
+            assert!(!effects.is_empty(), "Stage {:?} must have effects", stage);
+            for eff in &effects {
+                let cmd = eff.to_command("@p");
+                assert!(cmd.starts_with("effect give @p "));
+                assert!(cmd.ends_with(" true"));
+            }
+        }
+
+        // Verify lethal threshold triggers damage and lethal command constant
+        assert_eq!(sickness::LETHAL_COMMAND, "kill @p");
+        set_player_dose(uuid, 1500.0);
+        let eval_lethal = tick_player_sickness(uuid);
+        assert!(eval_lethal.damage.is_some());
+        assert_eq!(eval_lethal.damage.unwrap(), sickness::LETHAL_DAMAGE_AMOUNT);
+
+        // Simulate tick lethal resolution: dose reset upon lethal damage
+        set_player_dose(uuid, 0.0);
+        assert_eq!(get_player_dosimetry(uuid).dose, 0.0);
+
+        reset_state();
+    }
+
+    #[test]
     fn test_geiger_click_interval_logarithmic_scaling() {
-        // Radiation intensities: 0, 0.1, 1.0, 10.0, 100.0, 1000.0 Rad/s
+        // Radiation rates: 0, 0.1, 1.0, 10.0, 100.0, 1000.0 Rad/s
         assert_eq!(geiger_hud::geiger_click_interval(0.0), None);
         assert_eq!(geiger_hud::geiger_click_interval(-5.0), None);
         assert_eq!(geiger_hud::geiger_click_interval(1e-6), None);
@@ -1876,6 +2291,115 @@ mod tests {
             }
         }
         assert_eq!(clicks, 20); // Exactly 20 clicks in 20 ticks (1 second)
+    }
+
+    #[test]
+    fn test_authentic_geiger_sound_selection() {
+        // Test candidates generation matching Java ItemGeigerCounter / TileEntityGeiger:
+        // x < 1 -> [0, 0, 1]
+        let (cand, count) = geiger_hud::geiger_sound_candidates(0.5);
+        assert_eq!(&cand[..count], &[0, 0, 1]);
+
+        // x = 8.0 (5 < x < 15, x < 10) -> [1, 2]
+        let (cand, count) = geiger_hud::geiger_sound_candidates(8.0);
+        assert_eq!(&cand[..count], &[1, 2]);
+
+        // x = 12.0 (5 < x < 15, 10 < x < 20) -> [2, 3]
+        let (cand, count) = geiger_hud::geiger_sound_candidates(12.0);
+        assert_eq!(&cand[..count], &[2, 3]);
+
+        // x = 18.0 (10 < x < 20, 15 < x < 25) -> [3, 4]
+        let (cand, count) = geiger_hud::geiger_sound_candidates(18.0);
+        assert_eq!(&cand[..count], &[3, 4]);
+
+        // x = 22.0 (15 < x < 25, 20 < x < 30) -> [4, 5]
+        let (cand, count) = geiger_hud::geiger_sound_candidates(22.0);
+        assert_eq!(&cand[..count], &[4, 5]);
+
+        // x = 35.0 (x > 25) -> [6]
+        let (cand, count) = geiger_hud::geiger_sound_candidates(35.0);
+        assert_eq!(&cand[..count], &[6]);
+
+        // Test deterministic selection from random values:
+        // x = 35.0 -> tier 6 always
+        assert_eq!(geiger_hud::select_geiger_sound(35.0, 0.1), Some(6));
+        assert_eq!(geiger_hud::select_geiger_sound(35.0, 0.9), Some(6));
+
+        // x = 0.5 (pool [0, 0, 1]):
+        // rand in [0.0..0.666) -> None (silence), in [0.666..1.0) -> Some(1)
+        assert_eq!(geiger_hud::select_geiger_sound(0.5, 0.1), None);
+        assert_eq!(geiger_hud::select_geiger_sound(0.5, 0.5), None);
+        assert_eq!(geiger_hud::select_geiger_sound(0.5, 0.8), Some(1));
+
+        // x <= 1e-5: background 1 in 50 cosmic ray click
+        assert_eq!(geiger_hud::select_geiger_sound(0.0, 0.01), Some(1)); // < 0.02
+        assert_eq!(geiger_hud::select_geiger_sound(0.0, 0.05), None); // >= 0.02
+
+        // 5-tick cadence stepping:
+        let mut audio = geiger_hud::GeigerAudioState::new();
+        // ticks 1..4 should return None regardless of radiation
+        assert_eq!(audio.step_tick(35.0), None);
+        assert_eq!(audio.step_tick(35.0), None);
+        assert_eq!(audio.step_tick(35.0), None);
+        assert_eq!(audio.step_tick(35.0), None);
+        // tick 5 should evaluate and return Some(6) (at 35 Rad/s, candidates is [6])
+        assert_eq!(audio.step_tick(35.0), Some(6));
+    }
+
+    #[test]
+    fn test_geiger_sound_events_and_tech_boop_parity() {
+        assert_eq!(geiger_hud::SOUND_TECH_BOOP, "nbm_r:item.techBoop");
+        assert_eq!(geiger_hud::geiger_sound_event(1), "nbm_r:item.geiger1");
+        assert_eq!(geiger_hud::geiger_sound_event(2), "nbm_r:item.geiger2");
+        assert_eq!(geiger_hud::geiger_sound_event(3), "nbm_r:item.geiger3");
+        assert_eq!(geiger_hud::geiger_sound_event(4), "nbm_r:item.geiger4");
+        assert_eq!(geiger_hud::geiger_sound_event(5), "nbm_r:item.geiger5");
+        assert_eq!(geiger_hud::geiger_sound_event(6), "nbm_r:item.geiger6");
+        // Unknown or fallback tier defaults to item.geiger1
+        assert_eq!(geiger_hud::geiger_sound_event(0), "nbm_r:item.geiger1");
+        assert_eq!(geiger_hud::geiger_sound_event(7), "nbm_r:item.geiger1");
+
+        // Verify all events start with "nbm_r:item." so Horizon sound engine maps them to "player" category
+        for tier in 1..=6 {
+            let event = geiger_hud::geiger_sound_event(tier);
+            assert!(event.starts_with("nbm_r:item."), "Sound event {} must have item. prefix", event);
+        }
+    }
+
+    #[test]
+    fn test_format_geiger_summary_parity() {
+        // Case 1: Clean environment, healthy player, no hazmat
+        let summary_clean = geiger_hud::format_geiger_summary(0.0, 0.0, 0.0, 0);
+        assert_eq!(summary_clean.title, "§6===== ☢ Geiger Counter ☢ =====");
+        assert_eq!(summary_clean.chunk_rad, "§eChunk Rad: §a0.0 RAD/s");
+        assert_eq!(summary_clean.env_rad, "§eEnv Rad: §a0.0 RAD/s");
+        assert_eq!(summary_clean.player_rad, "§ePlayer Rad: §a0.0 RAD");
+        assert_eq!(summary_clean.player_res, "§ePlayer Res: §f0.00% (0.00)");
+
+        // Case 2: Radioactive chunk (15.5 RAD/s -> < 100 Red), env (0.7 RAD/s -> < 1 Yellow),
+        // player dose 250 RAD (Stage 1 -> < 400 Yellow), full hazmat suit (4 pieces: 2.0 res -> 99.00% Green)
+        let summary_radioactive = geiger_hud::format_geiger_summary(15.5, 0.7, 250.0, 4);
+        assert_eq!(summary_radioactive.chunk_rad, "§eChunk Rad: §c15.5 RAD/s");
+        assert_eq!(summary_radioactive.env_rad, "§eEnv Rad: §e0.7 RAD/s");
+        assert_eq!(summary_radioactive.player_rad, "§ePlayer Rad: §e250.0 RAD");
+        assert_eq!(summary_radioactive.player_res, "§ePlayer Res: §a99.00% (2.00)");
+
+        // Case 3: High radiation dose thresholds color transitions
+        // 500 RAD -> Gold (§6)
+        let s_500 = geiger_hud::format_geiger_summary(0.0, 0.0, 500.0, 0);
+        assert_eq!(s_500.player_rad, "§ePlayer Rad: §6500.0 RAD");
+
+        // 750 RAD -> Red (§c)
+        let s_750 = geiger_hud::format_geiger_summary(0.0, 0.0, 750.0, 0);
+        assert_eq!(s_750.player_rad, "§ePlayer Rad: §c750.0 RAD");
+
+        // 950 RAD -> Dark Red (§4)
+        let s_950 = geiger_hud::format_geiger_summary(0.0, 0.0, 950.0, 0);
+        assert_eq!(s_950.player_rad, "§ePlayer Rad: §4950.0 RAD");
+
+        // 1200 RAD -> Dark Gray (§8)
+        let s_1200 = geiger_hud::format_geiger_summary(0.0, 0.0, 1200.0, 0);
+        assert_eq!(s_1200.player_rad, "§ePlayer Rad: §81200.0 RAD");
     }
 
     #[test]
@@ -1976,5 +2500,61 @@ mod tests {
         let total = total_item_radiation(items.iter().map(|&(id, cnt)| (id, cnt)));
         let expected = 2.0 * content::URANIUM_INGOT_RAD_PER_SEC + 4.0 * content::URANIUM_ORE_RAD_PER_SEC;
         assert!((total - expected).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_server_player_exposure_with_hazmat_and_sickness() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        reset_state();
+        let server_uuid = 12345u128;
+        let dim = "minecraft:overworld";
+
+        // 1. Chunks with radiation
+        set_chunk_radiation(dim, 0, 0, 100.0);
+        let items = [(content::ITEM_URANIUM_INGOT, 1)];
+
+        // Test helpers
+        let (chunk_rad, ambient_rad) = calculate_ambient_radiation_at(dim, 0.0, 0.0, items.iter().copied());
+        assert_eq!(chunk_rad, 100.0);
+        assert!((ambient_rad - 100.35).abs() < EPSILON);
+
+        let armor_ids = [
+            content::ITEM_HAZMAT_HELMET,
+            content::ITEM_HAZMAT_CHESTPLATE,
+            content::ITEM_HAZMAT_LEGGINGS,
+            content::ITEM_HAZMAT_BOOTS,
+        ];
+        assert_eq!(count_hazmat_pieces(armor_ids.iter().copied()), 4);
+        assert!(check_has_geiger_counter([content::ITEM_GEIGER_COUNTER].iter().copied()));
+
+        // 2. Full hazmat protection: 99% attenuation
+        let absorbed_rate = record_player_exposure(
+            server_uuid,
+            chunk_rad,
+            &items,
+            4,
+            1.0, // 1 second
+        );
+        // Absorbed should be 1% of 100.35 = 1.0035 Rad/s
+        assert!((absorbed_rate - 1.0035).abs() < EPSILON);
+        let data = get_player_dosimetry(server_uuid);
+        assert!((data.dose - 1.0035).abs() < EPSILON);
+
+        // 3. Sickness stage progression when exposed to high dose
+        set_player_dose(server_uuid, 250.0);
+        let eval_s1 = tick_player_sickness(server_uuid);
+        assert_eq!(eval_s1.stage, sickness::RadiationSicknessStage::Stage1);
+        assert!(eval_s1.stage.is_sick());
+        assert!(!eval_s1.effects.is_empty());
+
+        // 4. Lethal dose triggers damage and reset on death
+        set_player_dose(server_uuid, 1000.0);
+        let eval_lethal = tick_player_sickness(server_uuid);
+        assert_eq!(eval_lethal.stage, sickness::RadiationSicknessStage::Lethal);
+        assert!(eval_lethal.damage.is_some());
+        on_player_death(server_uuid);
+        assert_eq!(get_player_dosimetry(server_uuid).dose, 0.0);
+
+        reset_state();
     }
 }
